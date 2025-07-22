@@ -18,27 +18,13 @@ See also our companion [paper](https://arxiv.org/abs/2104.10159).
 
 ### Installation
 
-#### Standard Installation
-
-``mbrl`` requires Python 3.8+ library and [PyTorch (>= 1.7)](https://pytorch.org). 
-To install the latest stable version, run
-
-    pip install mbrl
-
 #### Developer installation --- this is what you want to do 
 
+
 If you are interested in modifying the library, clone the repository and set up 
-a development environment as follows. After you clone the repository, and before you install it, do these: 
+a development environment as follows. After you clone the repository, and before you install it, setup the environment. Do these: 
 
 ![Do these steps before installing](mbrl.png)
-
-    git clone https://github.com/facebookresearch/mbrl-lib.git
-    pip install -e ".[dev]"
-
-And test it by running the following from the root folder of the repository
-
-    python -m pytest tests/core
-    python -m pytest tests/algorithms
 
 
 ### Basic example
