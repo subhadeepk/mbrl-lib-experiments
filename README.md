@@ -25,7 +25,10 @@ To install the latest stable version, run
 
     pip install mbrl
 
-#### Developer installation
+#### Developer installation --- this is what you want to do 
+Before cloming the repository, setup a conda environment: 
+
+!Do these steps](mbrl.png)
 If you are interested in modifying the library, clone the repository and set up 
 a development environment as follows
 
