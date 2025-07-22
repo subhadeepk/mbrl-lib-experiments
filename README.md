@@ -27,8 +27,6 @@ To install the latest stable version, run
 
 #### Developer installation --- this is what you want to do 
 
-
-![Do these steps](mbrl.png)
 If you are interested in modifying the library, clone the repository and set up 
 a development environment as follows. After you clone the repository, and before you install it, do these: 
 
