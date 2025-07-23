@@ -395,7 +395,7 @@ class Robot:
 
         # errors in position
         ep = p_d - p
-        print(ep)
+        # print(ep)
         ev = v_d - v
         self.log_p.append(ep)
         self.PID.e_p_i += ep
@@ -489,7 +489,19 @@ class Robot:
 
         self.log_th.append(R.dot(w[:3]))
         self.log_tor.append(w[3:])
-        # return u
+        crash = self.crash_check()
+        if crash:
+            return True
+        else:
+            return False
+    
+    def crash_check(self):
+        # Check if the robot has crashed based on its z position and roll, pitch angles
+        p = self.get_position()
+        rpy = self.get_orientation()
+        if p[2] < -0.0 or np.abs(rpy[0]) > np.pi/3 or np.abs(rpy[1]) > np.pi/3:
+            print("Crash detected!")
+            return True
 
 
 class PID_param:
@@ -939,88 +951,72 @@ def get_state(r1, d1):
 
     return np.concatenate([pos1, ang1, vel1, ang_vel1, pos2, ang2, vel2, ang_vel2])
 
-def generate_training_trajectory(order=5):
-        """
-        Generates position and orientation trajectories using piecewise3D.
+def generate_training_trajectory(
+    start_pos=[0.0, 0.0, 1.0], start_yaw=0.0, 
+    start_vel=[0.0, 0.0, 0.0], start_yaw_rate=0.0,
+    std_position_change=0.2,
+    std_orientation_change=0.0,
+    std_velocity_change=0.05,
+    std_angular_velocity_change=0.0,
+    std_acceleration_change=0.0,
+    std_angular_acceleration_change=0.0,
+    num_waypoints=20, 
+    num_time_step=5):
+    """
+    Generates position and orientation trajectories using piecewise3D.
 
-        Returns:
-            pos_traj: (x, y, z, dx, dy, dz, ddx, ddy, ddz)
-            orient_traj: (roll, pitch, yaw, droll, dpitch, dyaw, ddroll, ddpitch, ddyaw)
-        """
-         # get trajectory
-        # Waypoints
-        p1 = [0.0, 0.0, 0.1]
-        p2 = [0.0, 0.0, 1.0]
-        p3 = [0.0, 0.0, 1.0]
-        p4 = [0.0, 0.0, 1.0]
-        p5 = [0.0, 0.0, 1.0]
+    Returns:
+        pos_traj: (x, y, z, dx, dy, dz, ddx, ddy, ddz)
+        orient_traj: (roll, pitch, yaw, droll, dpitch, dyaw, ddroll, ddpitch, ddyaw)
+    """
+    # get trajectory
+    # Waypoints
+    total_points = 2 + num_waypoints
+    P = np.zeros((total_points, 3), dtype=float)        # position waypoints
+    V = np.zeros((total_points, 3), dtype=float)        # velocity waypoints
+    ACC = np.zeros((total_points, 3), dtype=float)      # acceleration waypoints
+    TH = np.zeros((total_points, 3), dtype=float)       # orientation waypoints
+    OMEGA = np.zeros((total_points, 3), dtype=float)    # angular velocity waypoints
+    ALPHA = np.zeros((total_points, 3), dtype=float)    # angular acceleration waypoints
 
-        # Velocities
-        v1 = [0.0, 0.0, 0.0]
-        v2 = [0.0, 0.0, 0.0]
-        v3 = [0.0, 0.0, 0.0]
-        v4 = [0.0, 0.0, 0.0]
-        v5 = [0.0, 0.0, 0.0]
+    P[:2, :] = np.array([[0, 0, 0.1], start_pos])
+    V[:2, :] = np.array([[0, 0, 0.0], start_vel])
+    TH[:2, :] = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, start_yaw]])
+    OMEGA[:2, :] = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, start_yaw_rate]])
+    for i in range(2, total_points):
+        noise = np.random.normal(loc=0.0, scale=std_position_change, size=3)
+        tentative_pos = P[i - 1] + noise
+        if tentative_pos[2] < 0.2:
+            tentative_pos[2] = 0.2
+        P[i] = tentative_pos
+        V[i] = V[i - 1] + np.random.normal(loc=0.0, scale=std_velocity_change, size=3)
+        ACC[i] = ACC[i - 1] + np.random.normal(loc=0.0, scale=std_acceleration_change, size=3)
+        TH[i][2] = TH[i - 1][2] + np.random.normal(loc=0.0, scale=std_orientation_change, size=1)
+        OMEGA[i][2] = OMEGA[i - 1][2] + np.random.normal(loc=0.0, scale=std_angular_velocity_change, size=1)
+        ALPHA[i][2] = ALPHA[i - 1][2] + np.random.normal(loc=0.0, scale=std_angular_acceleration_change, size=1)
 
-        # Accelerations
-        acc1 = [0.0, 0.0, 0.0]
-        acc2 = [0.0, 0.0, 0.0]
-        acc3 = [0.0, 0.0, 0.0]
-        acc4 = [0.0, 0.0, 0.0]
-        acc5 = [0.0, 0.0, 0.0]
+    X, Y, Z = P[:, 0], P[:, 1], P[:, 2]
+    Vx, Vy, Vz = V[:, 0], V[:, 1], V[:, 2]
+    Accx, Accy, Accz = ACC[:, 0], ACC[:, 1], ACC[:, 2]
 
-        # Waypoints of angles
-        th1 = [0.0, 0.0, 0.0]
-        th2 = [0.0, 0.0, 0.0]
-        th3 = [0.0, 0.0, 0.0]
-        th4 = [0.0, 0.0, 0.0]
-        th5 = [0.0, 0.0, 0.0]
+    rolls, pitchs, yaws = TH[:, 0], TH[:, 1], TH[:, 2]
+    omegar, omegap, omegay = OMEGA[:, 0], OMEGA[:, 1], OMEGA[:, 2]
+    alphar, alphap, alphay = ALPHA[:, 0], ALPHA[:, 1], ALPHA[:, 2]
 
-        # Velocities of angles
-        omega1 = [0.0, 0.0, 0.0]
-        omega2 = [0.0, 0.0, 0.0]
-        omega3 = [0.0, 0.0, 0.0]
-        omega4 = [0.0, 0.0, 0.0]
-        omega5 = [0.0, 0.0, 0.0]
+    time_duration = (num_waypoints + 2)*num_time_step
+    T = np.linspace(0, time_duration, total_points)
 
-        # Accelerations of angles
-        alpha1 = [0.0, 0.0, 0.0]
-        alpha2 = [0.0, 0.0, 0.0]
-        alpha3 = [0.0, 0.0, 0.0]
-        alpha4 = [0.0, 0.0, 0.0]
-        alpha5 = [0.0, 0.0, 0.0]
+        
+    pos_traj = piecewise3D(X, Y, Z, Vx, Vy, Vz, Accx, Accy, Accz, T, num_waypoints)
+    orient_traj = piecewise3D(rolls, pitchs, yaws, omegar, omegap, omegay, alphar, alphap, alphay, T, num_waypoints)
+    return pos_traj, orient_traj, time_duration
 
-        P = np.vstack((p1, p2, p3, p4, p5))
-        V = np.vstack((v1, v2, v3, v4, v5))
-        Acc = np.vstack((acc1, acc2, acc3, acc4, acc5))
-
-        TH = np.vstack((th1, th2, th3, th4, th5))
-        OMEGA = np.vstack((omega1, omega2, omega3, omega4, omega5))
-        ALPHA = np.vstack((alpha1, alpha2, alpha3, alpha4, alpha5))
-
-        X, Y, Z = P[:, 0], P[:, 1], P[:, 2]
-        Vx, Vy, Vz = V[:, 0], V[:, 1], V[:, 2]
-        Accx, Accy, Accz = Acc[:, 0], Acc[:, 1], Acc[:, 2]
-
-        rolls, pitchs, yaws = TH[:, 0], TH[:, 1], TH[:, 2]
-        omegar, omegap, omegay = OMEGA[:, 0], OMEGA[:, 1], OMEGA[:, 2]
-        alphar, alphap, alphay = ALPHA[:, 0], ALPHA[:, 1], ALPHA[:, 2]
-
-        time_duration = 80
-        T = np.array([0.0, 10.0, 20.0, 30.0, 40.0])
-
-           
-        pos_traj = piecewise3D(X, Y, Z, Vx, Vy, Vz, Accx, Accy, Accz, T, order)
-        orient_traj = piecewise3D(rolls, pitchs, yaws, omegar, omegap, omegay, alphar, alphap, alphay, T, order)
-        return pos_traj, orient_traj
-
-def collect_dynamics_training_data(r1, d1, cut_at = 60, time_duration=80):
+def collect_dynamics_training_data(r1, d1, cut_at = 60):
     """
     Runs the trajectory following and data collection loop, returning the replay buffer.
     Args:
         r1: Robot instance (the main robot)
         d1: Robot instance (the desired/ghost robot)
-        time_duration: total duration of the trajectory (default 80)
     Returns:
         replay_buffer: SimpleReplayBuffer containing collected data
     """
@@ -1034,7 +1030,7 @@ def collect_dynamics_training_data(r1, d1, cut_at = 60, time_duration=80):
         d1.get_position()
         time.sleep(0.01)
 
-    pos_traj, orient_traj = generate_training_trajectory()  # generates trajectory for the first 40 seconds
+    pos_traj, orient_traj, time_duration = generate_training_trajectory()  # generates trajectory for the first 40 seconds
     x, y, z, dx, dy, dz, ddx, ddy, ddz = pos_traj
     roll, pitch, yaw, droll, dpitch, dyaw, ddroll, ddpitch, ddyaw = orient_traj
 
@@ -1081,57 +1077,57 @@ def collect_dynamics_training_data(r1, d1, cut_at = 60, time_duration=80):
     return replay_buffer
 
 
-# if __name__ == "__main__":
-#     # sim.startSimulation()
-#     r1 = Robot(
-#         'MultiRotor',
-#         ['/propeller{}'.format(i+1) for i in range(8)],
-#         PID_param(
-#             mass=0.32, inertia=0.03,
-#             KZ=(5.0, 3.5, 0.0),
-#             KX=(2.0, 3.0, 0.0),
-#             KY=(0.2, 0.6, 0.0),
-#             KR=(1.5, 0.8, 0.0),
-#             KP=(0.8, 0.6, 0.0),
-#             KYAW=(-0.6, -0.5, 0.0)
-#         )
-#     )
-#     d1 = Robot('DesiredBox')
-#     g = 9.81
-#     try:
+if __name__ == "__main__":
+    # sim.startSimulation()
+    r1 = Robot(
+        'MultiRotor',
+        ['/propeller{}'.format(i+1) for i in range(8)],
+        PID_param(
+            mass=0.32, inertia=0.03,
+            KZ=(5.0, 3.5, 0.0),
+            KX=(2.0, 3.0, 0.0),
+            KY=(0.2, 0.6, 0.0),
+            KR=(1.5, 0.8, 0.0),
+            KP=(0.8, 0.6, 0.0),
+            KYAW=(-0.6, -0.5, 0.0)
+        )
+    )
+    d1 = Robot('DesiredBox')
+    g = 9.81
+    try:
         
-#         # r1.reset_simulation()
-#         replay_buffer = collect_dynamics_training_data(r1, d1, time_duration=80)
-#         time.sleep(1)
-#         # r1.reset_simulation()
-#         replay_buffer = collect_dynamics_training_data(r1, d1, time_duration=80)
+        # r1.reset_simulation()
+        replay_buffer = collect_dynamics_training_data(r1, d1, time_duration=80)
+        time.sleep(1)
+        # r1.reset_simulation()
+        # replay_buffer = collect_dynamics_training_data(r1, d1, time_duration=80)
 
-#         pos = r1.get_position()
-#         print("Size of replay buffer: ",  replay_buffer.__len__())
-#         print("last buffer entry", replay_buffer.data[-1])
-#         d1.get_position()
-#         d1.get_quaternion()
-#         d1.get_orientation()
-#         d1.get_velocity()
-#         time.sleep(0.1)
-#         # while True:
-#         #     print("Entered pos hold")
-#         #     time_start = time.time()
-#         #     # d1.set_position(np.array([np.cos(time_start/10), np.sin(time_start/12), 1.8+0.2*np.cos(time_start/9.0)]))
-#         #     # d1.set_position(np.array([2*np.cos(time_start/2), 1.5*np.sin(time_start/2.5), 5+0.2*np.cos(time_start/3)]))
-#         #     # d1.set_orientation(np.array([0.2*np.sin(time_start/11.0), 0.3*np.cos(time_start/15.0), np.pi*0.3*np.cos(time_start/12.5)]))
-#         #     # d1.set_orientation(np.array([time_start/10.0, 0, 0]))
-#         #     # r1.control(pos, d1.get_quaternion(), d1.get_orientation(), d1.get_velocity())
-#         #     d1.log_position.append(d1.get_position())
-#         #     d1.log_angles.append(d1.get_orientation())
-#         #     d1.log_time.append(time.time() - time_start)
-#         #     pid_actions= r1.get_pid_controller_actions(d1.get_position(), d1.get_quaternion(), d1.get_orientation(), d1.get_velocity())
-#         #     r1.send_actions_to_sim(pid_actions)
-#         #     r1.log_time.append(time.time() - time_start)
-#         #     while time.time() - time_start < 0.05:
-#         #         time.sleep(0.001)
-#     except KeyboardInterrupt:
-#         r1.close_connection()
+        pos = r1.get_position()
+        print("Size of replay buffer: ",  replay_buffer.__len__())
+        print("last buffer entry", replay_buffer.data[-1])
+        d1.get_position()
+        d1.get_quaternion()
+        d1.get_orientation()
+        d1.get_velocity()
+        time.sleep(0.1)
+        while True:
+            print("Entered pos hold")
+            time_start = time.time()
+            # d1.set_position(np.array([np.cos(time_start/10), np.sin(time_start/12), 1.8+0.2*np.cos(time_start/9.0)]))
+            # d1.set_position(np.array([2*np.cos(time_start/2), 1.5*np.sin(time_start/2.5), 5+0.2*np.cos(time_start/3)]))
+            # d1.set_orientation(np.array([0.2*np.sin(time_start/11.0), 0.3*np.cos(time_start/15.0), np.pi*0.3*np.cos(time_start/12.5)]))
+            # d1.set_orientation(np.array([time_start/10.0, 0, 0]))
+            # r1.control(pos, d1.get_quaternion(), d1.get_orientation(), d1.get_velocity())
+            d1.log_position.append(d1.get_position())
+            d1.log_angles.append(d1.get_orientation())
+            d1.log_time.append(time.time() - time_start)
+            pid_actions= r1.get_pid_controller_actions(d1.get_position(), d1.get_quaternion(), d1.get_orientation(), d1.get_velocity())
+            r1.send_actions_to_sim(pid_actions)
+            r1.log_time.append(time.time() - time_start)
+            while time.time() - time_start < 0.05:
+                time.sleep(0.001)
+    except KeyboardInterrupt:
+        r1.close_connection()
 
     # Instead of inline plotting, call the function:
     # plot_results(r1, d1)
