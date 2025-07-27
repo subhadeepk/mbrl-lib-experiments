@@ -21,7 +21,7 @@ class SimpleReplayBuffer:
         self.data = []
 
     def add(self, obs, action, next_obs, terminated, truncated):
-        reward = np.linalg.norm(next_obs[:3] - next_obs[12:15])
+        reward = 0
         self.data.append((obs, action, next_obs, reward, terminated, truncated))
 
     def __len__(self):
@@ -73,7 +73,7 @@ class Robot:
 
     def open_connection_box(self):
         # sim.simxFinish(-1)  # just in case, close all opened connections
-        self.client_id = sim.simxStart('127.0.0.1', 19999, True, True, 5000, 5)  # Connect to CoppeliaSim
+        self.client_id = sim.simxStart('127.0.0.1', 19997, True, True, 5000, 5)  # Connect to CoppeliaSim
 
         if self.client_id != -1:
             print('Robot connected', self.frame_name)
@@ -84,7 +84,7 @@ class Robot:
     
     def open_connection(self):
         # sim.simxFinish(-1)  # just in case, close all opened connections
-        self.client_id = sim.simxStart('127.0.0.1', 19999, True, True, 5000, 5)  # Connect to CoppeliaSim
+        self.client_id = sim.simxStart('127.0.0.1', 19997, True, True, 5000, 5)  # Connect to CoppeliaSim
 
         if self.client_id != -1:
             print('Robot connected', self.frame_name)
@@ -945,11 +945,11 @@ def get_state(r1, d1):
     pos1 = r1.get_position()
     ang1 = r1.get_orientation()
     vel1, ang_vel1 = r1.get_velocity()
-    pos2 = d1.get_position()
-    ang2 = d1.get_orientation()
-    vel2, ang_vel2 = d1.get_velocity()
+    # pos2 = d1.get_position()
+    # ang2 = d1.get_orientation()
+    # vel2, ang_vel2 = d1.get_velocity()
 
-    return np.concatenate([pos1, ang1, vel1, ang_vel1, pos2, ang2, vel2, ang_vel2])
+    return np.concatenate([pos1, ang1, vel1, ang_vel1]) #, pos2, ang2, vel2, ang_vel2])
 
 def generate_training_trajectory(
     start_pos=[0.0, 0.0, 1.0], start_yaw=0.0, 
@@ -1011,7 +1011,7 @@ def generate_training_trajectory(
     orient_traj = piecewise3D(rolls, pitchs, yaws, omegar, omegap, omegay, alphar, alphap, alphay, T, num_waypoints)
     return pos_traj, orient_traj, time_duration
 
-def collect_dynamics_training_data(r1, d1, cut_at = 60):
+def collect_dynamics_training_data(r1, d1, cut_at = 120):
     """
     Runs the trajectory following and data collection loop, returning the replay buffer.
     Args:

@@ -21,8 +21,8 @@ class ModQuadEnv(gym.Env):
             low=-10.0, high=10.0, shape=(6,), dtype=np.float32
         )  # wrench: 3 force, 3 torque
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(24,), dtype=np.float32
-        )  # 2x(pos(3)+ang(3)+vel(3)+ang_vel(3))
+            low=-np.inf, high=np.inf, shape=(12,), dtype=np.float32
+        )  # 1x(pos(3)+ang(3)+vel(3)+ang_vel(3))
         
         print('Connecting to CoppeliaSim...')
         mlb.sim.simxFinish(-1)  # Just in case, close all old connections
@@ -32,7 +32,6 @@ class ModQuadEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        
         
         mlb.sim.simxStartSimulation(self.client_id, mlb.sim.simx_opmode_blocking)
         
@@ -93,23 +92,38 @@ class ModQuadEnv(gym.Env):
         pos1 = self.robot.get_position()
         ang1 = self.robot.get_orientation()
         vel1, ang_vel1 = self.robot.get_velocity()
-        pos2 = self.target.get_position()
-        ang2 = self.target.get_orientation()
-        vel2, ang_vel2 = self.target.get_velocity()
-        obs = np.concatenate([pos1, ang1, vel1, ang_vel1, pos2, ang2, vel2, ang_vel2])
+        # pos2 = self.target.get_position()
+        # ang2 = self.target.get_orientation()
+        # vel2, ang_vel2 = self.target.get_velocity()
+        obs = np.concatenate([pos1, ang1, vel1, ang_vel1]) #, pos2, ang2, vel2, ang_vel2])
         return obs.astype(np.float32)
 
-    def step(self, action):
+    def step(self, action, traj_step = None):
+
+        """trajectory tracking is used to track the target trajectory and terminate the episode when the target trajectory is completed
+        traj_step is the current step in the target trajectory
+        traj_step is none by default """
+
+        if traj_step is not None:
+            target_pos = np.array([self.x[traj_step], self.y[traj_step], self.z[traj_step]])
+            target_ori = np.array([self.roll[traj_step], self.pitch[traj_step], self.yaw[traj_step]])
+            target_vel = np.array([self.dx[traj_step], self.dy[traj_step], self.dz[traj_step]])
+            target_ang_vel = np.array([self.droll[traj_step], self.dpitch[traj_step], self.dyaw[traj_step]])
+
         # action = np.clip(action, self.action_space.low, self.action_space.high)
         self.robot.send_actions_to_sim(action)
         time.sleep(self.dt)
         obs = self._get_obs()
         # Reward: negative distance between robot and target positions
         # Write a better reward function that takes velocity as well
-        reward = -np.linalg.norm(obs[:3] - obs[12:15])
-        self.current_step += 1
-        terminated = self.current_step >= self.max_steps
-        truncated = False
+        if traj_step is not None:
+            reward = -np.linalg.norm(obs[:3] - target_pos) - np.linalg.norm(obs[3:6] - target_ori)
+            terminated = traj_step + 1>= self.num_waypoints
+        else:
+            reward = 0
+            terminated = False
+        
+        truncated = self.robot.crash_check()
         info = {}
         return obs, reward, terminated, truncated, info
 
@@ -129,52 +143,81 @@ class ModQuadEnv(gym.Env):
     
     def run_gym_simulation(self, cut_at= 60, time_duration = 80):
         
-        simulation_start = time.time()
-        buff = mlb.SimpleReplayBuffer()
-        while time.time() - simulation_start < 1:
-            self.robot.get_position()
-            self.target.get_position()
-            time.sleep(0.01)
+        self.initialize_target_trajectory(traj = "random trajectory") 
+        
+       
+        all_rewards = [0]
+        trajectory_length, total_time, pos_traj, orient_traj = self.initialize_target_trajectory(traj = "random trajectory")
 
-        pos_traj, orient_traj = mlb.generate_training_trajectory()  # generates trajectory for the first 40 seconds
-        x, y, z, dx, dy, dz, ddx, ddy, ddz = pos_traj
-        roll, pitch, yaw, droll, dpitch, dyaw, ddroll, ddpitch, ddyaw = orient_traj
+        for trial in range(2):
+            
+            
+            obs, _ = self.reset()    
+            
+            terminated = False
+            total_reward = 0.0
+            steps_trial = 0
 
-        for i in range(len(x)):
-            time_start = time.time()
-            self.target.set_position(np.array([x[i], y[i], z[i]]))
-            self.target.log_position.append(np.array([x[i], y[i], z[i]]))
-            self.target.set_orientation(np.array([roll[i], pitch[i], yaw[i]]))
-            self.target.log_angles.append(np.array([roll[i], pitch[i], yaw[i]]))
-            self.target.log_time.append(time.time() - simulation_start)
-            # time.sleep(0.01)
-            obs = self._get_obs()
-            action = self.robot.get_pid_controller_actions(
-                        np.array([x[i], y[i], z[i]]),
-                        mlb.euler2quat(roll[i], pitch[i], yaw[i]),
-                        np.array([roll[i], pitch[i], yaw[i]]),
-                        (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
-                        (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
-                        )
-            nex_obs, reward, terminated, truncated, info = self.step(action)
-            buff.add(obs, action, nex_obs, terminated, truncated)
-            self.robot.log_time.append(time.time() - simulation_start)
+            traj_step = 0 
+            last_setpoint_set = time.time()
 
+            # update_axes(axs, env.render(), ax_text, trial, steps_trial, all_rewards)
+            while not terminated or truncated:
 
-            while time.time() - time_start < time_duration/len(x):
-                action = self.robot.get_pid_controller_actions(
-                        np.array([x[i], y[i], z[i]]),
-                        mlb.euler2quat(roll[i], pitch[i], yaw[i]),
-                        np.array([roll[i], pitch[i], yaw[i]]),
-                        (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
-                        (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
-                        )
-                nex_obs, reward, terminated, truncated, info = self.step(action)
-                buff.add(obs, action, nex_obs, terminated, truncated)
-                obs = nex_obs
-                self.robot.log_time.append(time.time() - simulation_start)
-                # if (time.time() - simulation_start>cut_at):
-                #     break
+                if time.time() - last_setpoint_set > total_time/trajectory_length:
+                    self.update_setpoint(traj_step)
+                    last_setpoint_set = time.time()
+                    traj_step += 1
+                    print(traj_step)
+
                 
-        print(buff.__len__)
+
+                # --- Doing env step using the agent and adding to model dataset ---
+                action = self.robot.get_pid_controller_actions(np.array([self.x[traj_step], self.y[traj_step], self.z[traj_step]]),
+                                                                mlb.euler2quat(self.roll[traj_step], self.pitch[traj_step], self.yaw[traj_step]),
+                                                                np.array([self.roll[traj_step], self.pitch[traj_step], self.yaw[traj_step]]),
+                                                                (np.array([self.dx[traj_step], self.dy[traj_step], self.dz[traj_step]]), 
+                                                                 np.array([self.droll[traj_step], self.dpitch[traj_step], self.dyaw[traj_step]])),
+                                                                (np.array([self.ddx[traj_step], self.ddy[traj_step], self.ddz[traj_step]]), 
+                                                                 np.array([self.ddroll[traj_step], self.ddpitch[traj_step], self.ddyaw[traj_step]])))
                 
+                next_obs, reward, terminated, truncated, _ = self.step(action, traj_step)
+                    
+                # update_axes(
+                #     axs, env.render(), ax_text, trial, steps_trial, all_rewards)
+                
+                obs = next_obs
+                total_reward += reward
+                print(total_reward)
+                steps_trial += 1
+
+            self.end_simulation()
+            self.reset()
+            all_rewards.append(total_reward)
+                
+
+
+    def initialize_target_trajectory(self, traj):
+        """Initialize the target trajectory for the environment.
+           Can initialize it as a predefined trajectory as well, like circle or square.
+        """
+        if traj == "random trajectory":
+            pos_traj, orient_traj, total_time = mlb.generate_training_trajectory()  # generates trajectory for the first 40 seconds
+            self.x, self.y, self.z, self.dx, self.dy, self.dz, self.ddx, self.ddy, self.ddz = pos_traj
+            self.roll, self.pitch, self.yaw, self.droll, self.dpitch, self.dyaw, self.ddroll, self.ddpitch, self.ddyaw = orient_traj
+            self.num_waypoints = len(self.x)
+
+        return len(self.x), total_time, pos_traj, orient_traj
+    
+    def update_setpoint(self, traj_step):
+        self.target.set_position(np.array([self.x[traj_step], self.y[traj_step], self.z[traj_step]]))
+        self.target.set_orientation(np.array([self.roll[traj_step], self.pitch[traj_step], self.yaw[traj_step]]))
+
+
+
+
+
+
+
+
+            
