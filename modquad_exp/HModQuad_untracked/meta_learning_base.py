@@ -4,7 +4,6 @@ import numpy as np
 import time
 import matplotlib.pyplot as plt
 import matplotlib
-import warnings
 # except:
 #     print('--------------------------------------------------------------')
 #     print('Library loading failed!')
@@ -653,7 +652,6 @@ class Robot:
 
         return f, tau
 
-
     def send_4x1ftau_to_sim(self, actions):
         """ Send the force and torque commands to the simulation.
             :param f: Force scalar in the desired rotor thrust direction.
@@ -682,7 +680,6 @@ class Robot:
 
         # print("u: {}".format(u))
         self.log_u.append(u)
-
         self.log_th.append(R.dot([0, 0, actions[0]]))  # actions[0] is the force scalar
         self.log_tor.append(actions[1])
         crash = self.crash_check()
@@ -690,6 +687,19 @@ class Robot:
             return True
         else:
             return False
+        
+        
+    def extract_geometric_control_input(self, force_Rd):
+        """ Send the force and torque commands to the simulation.
+            :param f: Force scalar in the desired rotor thrust direction.
+            :param tau: Torque vector in the body frame.
+            :return: True if crash detected, False otherwise.
+            :note: This function assumes that the robot has 4 ADoF
+        """
+        force_thrust, R_d = force_Rd  # force_thrust is the force scalar in the desired rotor thrust direction
+        roll, pitch, yaw = rot2rpy(R_d)
+        crash = self.crash_check()
+        return crash, force_thrust, np.array([roll, pitch, yaw])
 
 class PID_param:
     def __init__(self, mass, inertia, KZ, KX, KY, KR, KP, KYAW):
@@ -708,6 +718,32 @@ class PID_param:
         self.kpr, self.kdr, self.kir = KR
         self.kpp, self.kdp, self.kip = KP
         self.kpyaw, self.kdyaw, self.kiyaw = KYAW
+
+# Function to convert rotation matrix to roll, pitch, yaw (ZYX convention)
+def rot2rpy(R):
+    """
+    Converts a 3x3 rotation matrix to roll, pitch, yaw angles (in radians).
+    Uses the ZYX (yaw-pitch-roll) convention.
+    Issues a warning if the matrix is near a singularity (gimbal lock).
+    Args:
+        R (np.ndarray): 3x3 rotation matrix
+    Returns:
+        tuple: (roll, pitch, yaw)
+    """
+    if R.shape != (3, 3):
+        raise ValueError("Input must be a 3x3 matrix.")
+    sy = np.sqrt(R[0,0] ** 2 + R[1,0] ** 2)
+    singular = sy < 1e-6
+    if singular:
+        warnings.warn("Singularity detected: pitch is near +-90 degrees (gimbal lock). Results may be inaccurate.")
+        roll = np.arctan2(-R[1,2], R[1,1])
+        pitch = np.arctan2(-R[2,0], sy)
+        yaw = 0
+    else:
+        roll = np.arctan2(R[2,1], R[2,2])
+        pitch = np.arctan2(-R[2,0], sy)
+        yaw = np.arctan2(R[1,0], R[0,0])
+    return roll, pitch, yaw
 
 def quat2rot(quat):
     # Covert a quaternion into a full three-dimensional rotation matrix.
