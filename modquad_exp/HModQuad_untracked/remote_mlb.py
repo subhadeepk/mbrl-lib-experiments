@@ -25,11 +25,11 @@ def connect_run_disconnect():
                 ['/propeller{}'.format(i+1) for i in range(8)],
                 mlb.PID_param(
                     mass=0.32, inertia=0.03,
-                    KZ=(5.0, 3.5, 0.0),
-                KX=(2.0, 3.0, 0.0),
-                KY=(0.2, 0.6, 0.0),
-                KR=(1.5, 0.8, 0.0),
-                KP=(0.8, 0.6, 0.0),
+                    KZ=(5.0, 3.5, 0.1),
+                KX=(3.0, 4.0, 0.0),
+                KY=(0.3, 0.4, 0.0),
+                KR=(16.0, 6.5, 0.0),
+                KP=(1.25, 0.5, 0.0),
                 KYAW=(-0.6, -0.5, 0.0)
                 )
             )
@@ -37,7 +37,7 @@ def connect_run_disconnect():
             g = 9.81
             
                 
-            replay_buffer = mlb.collect_dynamics_training_data(r1, d1, time_duration=80)
+            replay_buffer = mlb.collect_dynamics_training_data(r1, d1)
 
                 
 
