@@ -688,18 +688,19 @@ class Robot:
         else:
             return False
         
-        
-    def extract_geometric_control_input(self, force_Rd):
-        """ Send the force and torque commands to the simulation.
-            :param f: Force scalar in the desired rotor thrust direction.
-            :param tau: Torque vector in the body frame.
-            :return: True if crash detected, False otherwise.
-            :note: This function assumes that the robot has 4 ADoF
-        """
-        force_thrust, R_d = force_Rd  # force_thrust is the force scalar in the desired rotor thrust direction
+    def get_geometric_attitude_control_input_as_actions(self, des_pos, des_quat, rpy_d, des_vel=None, des_acc=None):
+        """ Get the geometric attitude control output (force and torque) based on 
+            desired position, orientation, and velocity.
+            :param des_pos: Desired position in the world frame.
+            :param des_quat: Desired orientation in quaternion form, used only for full actuation.
+            :param rpy_d: Desired roll, pitch, yaw angles.
+            :param des_vel: Optional desired linear and angular velocity in the world frame.
+            :param des_acc: Optional desired linear and angular acceleration in the world frame.
+            :return: Force scalar in the desired rotor thrust direction 
+                    and torque vector in the body frame."""
+        f, R_d = self.get_geometric_attitude_control_input(des_pos, des_quat, rpy_d, des_vel, des_acc)
         roll, pitch, yaw = rot2rpy(R_d)
-        crash = self.crash_check()
-        return crash, force_thrust, np.array([roll, pitch, yaw])
+        return np.array([f, roll, pitch, yaw])
 
 class PID_param:
     def __init__(self, mass, inertia, KZ, KX, KY, KR, KP, KYAW):
@@ -735,7 +736,7 @@ def rot2rpy(R):
     sy = np.sqrt(R[0,0] ** 2 + R[1,0] ** 2)
     singular = sy < 1e-6
     if singular:
-        warnings.warn("Singularity detected: pitch is near +-90 degrees (gimbal lock). Results may be inaccurate.")
+        print("Singularity detected: pitch is near +-90 degrees (gimbal lock). Results may be inaccurate.")
         roll = np.arctan2(-R[1,2], R[1,1])
         pitch = np.arctan2(-R[2,0], sy)
         yaw = 0
@@ -1209,8 +1210,8 @@ def generate_training_trajectory(
     for i in range(2, total_points):
         noise = np.random.normal(loc=0.0, scale=std_position_change, size=3)
         tentative_pos = P[i - 1] + noise
-        if tentative_pos[2] < 0.2:
-            tentative_pos[2] = 0.2
+        if tentative_pos[2] < 0.5:
+            tentative_pos[2] = 0.5
         P[i] = tentative_pos
         V[i] = V[i - 1] + np.random.normal(loc=0.0, scale=std_velocity_change, size=3)
         ACC[i] = ACC[i - 1] + np.random.normal(loc=0.0, scale=std_acceleration_change, size=3)
@@ -1229,7 +1230,6 @@ def generate_training_trajectory(
     time_duration = (num_waypoints + 2)*num_time_step
     T = np.linspace(0, time_duration, total_points)
 
-        
     pos_traj = piecewise3D(X, Y, Z, Vx, Vy, Vz, Accx, Accy, Accz, T, num_waypoints)
     orient_traj = piecewise3D(rolls, pitchs, yaws, omegar, omegap, omegay, alphar, alphap, alphay, T, num_waypoints)
     return pos_traj, orient_traj, time_duration
@@ -1266,6 +1266,14 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
         d1.log_time.append(time.time() - simulation_start)
 
         state = get_state(r1, d1)
+        # actions = r1.get_geometric_attitude_control_output(
+        #     np.array([x[i], y[i], z[i]]),
+        #     euler2quat(roll[i], pitch[i], yaw[i]),
+        #     np.array([roll[i], pitch[i], yaw[i]]),
+        #     (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
+        #     (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
+        # )
+        # r1.send_4x1ftau_to_sim(actions)
         actions = r1.get_geometric_attitude_control_output(
             np.array([x[i], y[i], z[i]]),
             euler2quat(roll[i], pitch[i], yaw[i]),
@@ -1274,6 +1282,11 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
             (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
         )
         r1.send_4x1ftau_to_sim(actions)
+        actions = r1.get_geometric_attitude_control_input_as_actions(np.array([x[i], y[i], z[i]]),
+            euler2quat(roll[i], pitch[i], yaw[i]),
+            np.array([roll[i], pitch[i], yaw[i]]),
+            (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
+            (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]])))
         next_state = get_state(r1, d1)
         replay_buffer.add(state, actions, next_state, False, False)
         r1.log_time.append(time.time() - simulation_start)
