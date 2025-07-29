@@ -374,6 +374,9 @@ class Robot:
 
     # PID controller generates force and torque commands, returns a numpy array 
     def get_pid_controller_actions(self, des_pos, des_quat, rpy_d, des_vel=None, des_acc=None):
+        print("You should use another function: get_geometric_attitude_control_output instead")
+        assert False
+        # warnings.warn("You should use another function: get_geometric_attitude_control_output instead", DeprecationWarning)
         # Get the current and desired state
         g = 9.81
         p_d = des_pos
@@ -463,9 +466,12 @@ class Robot:
 
         w = np.concatenate([f, tau])
         return w
-        # print("wrench: {}".format(w))
-    
+
     def send_actions_to_sim(self, w):
+        print("You should use another function: send_4x1ftau_to_sim instead for 4ADoF robots")
+        assert False
+        # warnings.warn("You should use another function: send_4x1ftau_to_sim instead for 4ADoF robots", DeprecationWarning)
+
         R = quat2rot(self.get_quaternion())
         u_crude = self.inv_A.dot(self.D.dot(w))
 
@@ -504,6 +510,197 @@ class Robot:
             return True
 
 
+    def get_position_controller_output(self, des_pos, des_vel=None, des_acc=None):
+        """ Get the position control output (3x1 vector) based on 
+            desired position, velocity, and acceleration.
+            :param des_pos: Desired position in the world frame.
+            :param des_vel: Optional desired linear and angular velocity in the world frame.
+            :param des_acc: Optional desired linear and angular acceleration in the world frame.
+            :return: Force vector in the world frame.
+        """
+        g = 9.81
+        p_d = des_pos
+        v_d = np.array([0.0, 0.0, 0.0])
+        a_des = np.array([0.0, 0.0, 0.0])
+        if des_vel:
+            v_d, _ = des_vel
+        if des_acc:
+            a_des, _ = des_acc
+
+        # print("des vel: {}".format(des_vel))
+        p = self.get_position()
+        self.log_position.append(p)
+        v, _ = self.get_velocity()
+
+        # errors in position
+        ep = p_d - p
+        # print(ep)
+        ev = v_d - v
+        self.log_p.append(ep)
+        self.PID.e_p_i += ep
+        for i in range(len(self.PID.e_p_i)):
+            if self.PID.e_p_i[i] > self.PID.cap_p_i:
+                self.PID.e_p_i[i] = self.PID.cap_p_i
+            elif self.PID.e_p_i[i] < -self.PID.cap_p_i:
+                self.PID.e_p_i[i] = -self.PID.cap_p_i
+
+        # PID control for position in {W}
+        kp_z, kd_z, ki_z = self.PID.kpz, self.PID.kdz, self.PID.kiz
+        kp_x, kd_x, ki_x = self.PID.kpx, self.PID.kdx, self.PID.kix
+        kp_y, kd_y, ki_y = self.PID.kpy, self.PID.kdy, self.PID.kiy
+        ar = np.array([kp_x * ep[0] + kd_x * ev[0] + ki_x * self.PID.e_p_i[0],
+                       kp_y * ep[1] + kd_y * ev[1] + ki_y * self.PID.e_p_i[1],
+                       kp_z * ep[2] + kd_z * ev[2] + ki_z * self.PID.e_p_i[2]]) + a_des
+        ar[2] += g
+        f = self.PID.mass * ar
+        return f
+
+    def get_geometric_attitude_control_input(self, des_pos, des_quat, rpy_d, des_vel=None, des_acc=None):
+        """ Get the geometric attitude control input (force and rotation matrix) based on 
+            desired position, orientation, and velocity.
+            :param des_pos: Desired position in the world frame.
+            :param des_quat: Desired orientation in quaternion form, used only for full actuation.
+            :param rpy_d: Desired roll, pitch, yaw angles.
+            :param des_vel: Optional desired linear and angular velocity in the world frame.
+            :param des_acc: Optional desired linear and angular acceleration in the world frame.
+            :return: Force scalar in the desired rotor thrust direction and 
+                    desired rotation matrix for translation.
+        """
+        # Get the current and desired state
+        q_d = des_quat
+        R_d = quat2rot(q_d)
+
+        rpy = self.get_orientation()
+        self.log_angles.append(rpy)
+        R = quat2rot(self.get_quaternion())
+
+        # getting the position controller output
+        f = self.get_position_controller_output(des_pos, des_vel, des_acc)
+
+        # errors in rotations for logs
+        erpy = rpy_d - rpy
+        for i in range(len(erpy)):
+            if erpy[i] <= -np.pi:
+                erpy[i] += 2 * np.pi
+            elif erpy[i] > np.pi:
+                erpy[i] -= 2 * np.pi
+        self.log_rpy.append(erpy)
+
+        # getting the 1D thrust force
+        force_thrust = R.dot(self.Rsf).T.dot(f)[2]
+
+        if self.controllability != 6:
+            # special cases of under-actuation
+            z_d = f / np.linalg.norm(f)
+            if self.controllability == 4:
+                x_c = np.array([np.cos(rpy_d[2]), np.sin(rpy_d[2]), 0])
+            else:
+                _, pitch_d, yaw_d = rpy_d
+                x_c = np.array([np.cos(pitch_d)*np.cos(yaw_d), np.cos(pitch_d)*np.sin(yaw_d), np.sin(pitch_d)])
+            y_d = np.cross(z_d, x_c)
+            y_d = y_d / np.linalg.norm(y_d)
+            x_d = np.cross(y_d, z_d)
+            R_d = np.vstack([x_d, y_d, z_d]).T
+
+        # output the desired thrust force and the desired rotatiion matrix based on 
+        # the position control and the required orientation for translation
+        return force_thrust, R_d
+    
+    def get_geometric_attitude_control_output(self, des_pos, des_quat, rpy_d, des_vel=None, des_acc=None):
+        """ Get the geometric attitude control output (force and torque) based on 
+            desired position, orientation, and velocity.
+            :param des_pos: Desired position in the world frame.
+            :param des_quat: Desired orientation in quaternion form, used only for full actuation.
+            :param rpy_d: Desired roll, pitch, yaw angles.
+            :param des_vel: Optional desired linear and angular velocity in the world frame.
+            :param des_acc: Optional desired linear and angular acceleration in the world frame.
+            :return: Force scalar in the desired rotor thrust direction 
+                    and torque vector in the body frame."""
+        # getting the geometric attitude control input from the position controller
+        # and the desired rotation matrix for translation
+        omega_d = np.array([0.0, 0.0, 0.0])
+        alpha_des = np.array([0.0, 0.0, 0.0])
+        if des_vel:
+            _, omega_d = des_vel
+        if des_acc:
+            _, omega_d = des_acc
+
+        _, omega = self.get_velocity()
+        f, R_d = self.get_geometric_attitude_control_input(des_pos, des_quat, rpy_d, des_vel, des_acc)
+        R = quat2rot(self.get_quaternion())
+
+        eR = 0.5 * vee_map(R_d.T.dot(R.dot(self.Rsf)) - (R.dot(self.Rsf)).T.dot(R_d))
+        self.log_R.append(eR)
+        self.PID.e_R_i += eR
+        for i in range(len(self.PID.e_R_i)):
+            if self.PID.e_R_i[i] > self.PID.cap_R_i:
+                self.PID.e_R_i[i] = self.PID.cap_R_i
+            elif self.PID.e_R_i[i] < -self.PID.cap_R_i:
+                self.PID.e_R_i[i] = -self.PID.cap_R_i
+
+        eomega = omega_d - omega
+
+        kp_r, kd_r, ki_r = self.PID.kpr, self.PID.kdr, self.PID.kir
+        kp_p, kd_p, ki_p = self.PID.kpp, self.PID.kdp, self.PID.kip
+        kp_yaw, kd_yaw, ki_yaw = self.PID.kpyaw, self.PID.kdyaw, self.PID.kiyaw
+
+        aR = np.array([-kp_r * eR[0] + kd_r * eomega[0] - ki_r * self.PID.e_R_i[0],
+                       -kp_p * eR[1] + kd_p * eomega[1] - ki_p * self.PID.e_R_i[1],
+                       -kp_yaw * eR[2] + kd_yaw * eomega[2] - ki_yaw * self.PID.e_R_i[2]]) + alpha_des
+
+        tau = self.PID.inertia * aR
+
+        return f, tau
+
+    def send_4x1ftau_to_sim(self, actions):
+        """ Send the force and torque commands to the simulation.
+            :param f: Force scalar in the desired rotor thrust direction.
+            :param tau: Torque vector in the body frame.
+            :return: True if crash detected, False otherwise.
+            :note: This function assumes that the robot has 4 ADoF
+        """
+        R = quat2rot(self.get_quaternion())
+        four_by_one = np.array([actions[0], actions[1][0], actions[1][1], actions[1][2]])  # [f, tau_x, tau_y, tau_z]
+        u_crude = self.inv_A.dot(four_by_one)
+
+        if not (u_crude >= 0).all() and (self.ns > 0).all():
+            min_force_div = 0
+            for i in range(len(u_crude)):
+                if u_crude[i] / self.ns[i] < min_force_div:
+                    min_force_div = u_crude[i] / self.ns[i]
+
+            u = u_crude - self.ns * min_force_div
+            self.actuate(u.tolist())
+        else:
+            u = u_crude
+            # for i in range(len(u_crude)):
+            #     if u_crude[i] < 0:
+            #         u[i] = 0
+            self.actuate(u.tolist())
+
+        # print("u: {}".format(u))
+        self.log_u.append(u)
+        self.log_th.append(R.dot([0, 0, actions[0]]))  # actions[0] is the force scalar
+        self.log_tor.append(actions[1])
+        crash = self.crash_check()
+        if crash:
+            return True
+        else:
+            return False
+        
+        
+    def extract_geometric_control_input(self, force_Rd):
+        """ Send the force and torque commands to the simulation.
+            :param f: Force scalar in the desired rotor thrust direction.
+            :param tau: Torque vector in the body frame.
+            :return: True if crash detected, False otherwise.
+            :note: This function assumes that the robot has 4 ADoF
+        """
+        force_thrust, R_d = force_Rd  # force_thrust is the force scalar in the desired rotor thrust direction
+        roll, pitch, yaw = rot2rpy(R_d)
+        crash = self.crash_check()
+        return crash, force_thrust, np.array([roll, pitch, yaw])
+
 class PID_param:
     def __init__(self, mass, inertia, KZ, KX, KY, KR, KP, KYAW):
         # integral stuff
@@ -521,6 +718,32 @@ class PID_param:
         self.kpr, self.kdr, self.kir = KR
         self.kpp, self.kdp, self.kip = KP
         self.kpyaw, self.kdyaw, self.kiyaw = KYAW
+
+# Function to convert rotation matrix to roll, pitch, yaw (ZYX convention)
+def rot2rpy(R):
+    """
+    Converts a 3x3 rotation matrix to roll, pitch, yaw angles (in radians).
+    Uses the ZYX (yaw-pitch-roll) convention.
+    Issues a warning if the matrix is near a singularity (gimbal lock).
+    Args:
+        R (np.ndarray): 3x3 rotation matrix
+    Returns:
+        tuple: (roll, pitch, yaw)
+    """
+    if R.shape != (3, 3):
+        raise ValueError("Input must be a 3x3 matrix.")
+    sy = np.sqrt(R[0,0] ** 2 + R[1,0] ** 2)
+    singular = sy < 1e-6
+    if singular:
+        warnings.warn("Singularity detected: pitch is near +-90 degrees (gimbal lock). Results may be inaccurate.")
+        roll = np.arctan2(-R[1,2], R[1,1])
+        pitch = np.arctan2(-R[2,0], sy)
+        yaw = 0
+    else:
+        roll = np.arctan2(R[2,1], R[2,2])
+        pitch = np.arctan2(-R[2,0], sy)
+        yaw = np.arctan2(R[1,0], R[0,0])
+    return roll, pitch, yaw
 
 def quat2rot(quat):
     # Covert a quaternion into a full three-dimensional rotation matrix.
@@ -1011,7 +1234,7 @@ def generate_training_trajectory(
     orient_traj = piecewise3D(rolls, pitchs, yaws, omegar, omegap, omegay, alphar, alphap, alphay, T, num_waypoints)
     return pos_traj, orient_traj, time_duration
 
-def collect_dynamics_training_data(r1, d1, cut_at = 120):
+def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
     """
     Runs the trajectory following and data collection loop, returning the replay buffer.
     Args:
@@ -1043,14 +1266,14 @@ def collect_dynamics_training_data(r1, d1, cut_at = 120):
         d1.log_time.append(time.time() - simulation_start)
 
         state = get_state(r1, d1)
-        actions = r1.get_pid_controller_actions(
+        actions = r1.get_geometric_attitude_control_output(
             np.array([x[i], y[i], z[i]]),
             euler2quat(roll[i], pitch[i], yaw[i]),
             np.array([roll[i], pitch[i], yaw[i]]),
             (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
             (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
         )
-        r1.send_actions_to_sim(actions)
+        r1.send_4x1ftau_to_sim(actions)
         next_state = get_state(r1, d1)
         replay_buffer.add(state, actions, next_state, False, False)
         r1.log_time.append(time.time() - simulation_start)
@@ -1058,14 +1281,14 @@ def collect_dynamics_training_data(r1, d1, cut_at = 120):
         # while time.time() - simulation_start < 70:
 
             state = get_state(r1, d1)
-            actions = r1.get_pid_controller_actions(
+            actions = r1.get_geometric_attitude_control_output(
                 np.array([x[i], y[i], z[i]]),
                 euler2quat(roll[i], pitch[i], yaw[i]),
                 np.array([roll[i], pitch[i], yaw[i]]),
                 (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
                 (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
             )
-            r1.send_actions_to_sim(actions)
+            r1.send_4x1ftau_to_sim(actions)
             r1.log_time.append(time.time() - simulation_start)
             print(time.time() - simulation_start)
             
@@ -1095,7 +1318,6 @@ if __name__ == "__main__":
     d1 = Robot('DesiredBox')
     g = 9.81
     try:
-        
         # r1.reset_simulation()
         replay_buffer = collect_dynamics_training_data(r1, d1, time_duration=80)
         time.sleep(1)
@@ -1121,8 +1343,8 @@ if __name__ == "__main__":
             d1.log_position.append(d1.get_position())
             d1.log_angles.append(d1.get_orientation())
             d1.log_time.append(time.time() - time_start)
-            pid_actions= r1.get_pid_controller_actions(d1.get_position(), d1.get_quaternion(), d1.get_orientation(), d1.get_velocity())
-            r1.send_actions_to_sim(pid_actions)
+            pid_actions= r1.get_geometric_attitude_control_output(d1.get_position(), d1.get_quaternion(), d1.get_orientation(), d1.get_velocity())
+            r1.send_4x1ftau_to_sim(pid_actions)
             r1.log_time.append(time.time() - time_start)
             while time.time() - time_start < 0.05:
                 time.sleep(0.001)
