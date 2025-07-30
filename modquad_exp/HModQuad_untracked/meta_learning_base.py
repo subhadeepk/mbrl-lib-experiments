@@ -650,9 +650,8 @@ class Robot:
     
 
     def send_4x1frpy_to_sim(self, actions):
-        """ Send the force and torque commands to the simulation.
-            :param f: Force scalar in the desired rotor thrust direction.
-            :param tau: Torque vector in the body frame.
+        """ Send the force and roll pitch yaw commands to the simulation.
+            :param actions: 4D action array [f, roll, pitch, yaw]
             :return: True if crash detected, False otherwise.
             :note: This function assumes that the robot has 4 ADoF
         """
@@ -688,7 +687,7 @@ class Robot:
         """ Send the force and torque commands to the simulation.
             :param actions: 4D action array [f, tau_x, tau_y, tau_z]
             :return: True if crash detected, False otherwise.
-            :note: This function handles both 4 DoF and 5 DoF robots
+            :note: This function handles 4 DoF robots
         """
         R = quat2rot(self.get_quaternion())
         u_crude = self.inv_A.dot(actions)
@@ -1342,17 +1341,17 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
             )
             """NOTE: flavor 1: take the desired thrust and roll, pitch, yaw angles as actions 
             -- learning-based control WILL NOT bypass geometric control """
-            actions = r1.get_geometric_attitude_control_input_as_actions(f, R_d)
-            res = r1.send_4x1frpy_to_sim(actions)
+            # actions = r1.get_geometric_attitude_control_input_as_actions(f, R_d)
+            # res = r1.send_4x1frpy_to_sim(actions)
 
             """NOTE: flavor 2: take the desired thrust and torques as actions 
             -- learning-based control WILL bypass geometric control """
-            # actions = r1.get_geometric_attitude_control_output(
-            #     f, R_d,
-            #     (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
-            #     (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
-            # )
-            # res = r1.send_4x1ftau_to_sim(actions)
+            actions = r1.get_geometric_attitude_control_output(
+                f, R_d,
+                (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
+                (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
+            )
+            res = r1.send_4x1ftau_to_sim(actions)
             # ------ end control logic ------
             r1.log_time.append(time.time() - simulation_start)
             print(time.time() - simulation_start)
