@@ -1303,7 +1303,7 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
         """NOTE: flavor 1: take the desired thrust and roll, pitch, yaw angles as actions 
         -- learning-based control WILL NOT bypass geometric control """
         actions = r1.get_geometric_attitude_control_input_as_actions(f, R_d)
-        r1.send_4x1frpy_to_sim(actions)
+        res = r1.send_4x1frpy_to_sim(actions)
 
         """NOTE: flavor 2: take the desired thrust and torques as actions 
         -- learning-based control WILL bypass geometric control """
@@ -1312,11 +1312,11 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
         #     (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
         #     (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
         # )
-        # r1.send_4x1ftau_to_sim(actions)
+        # res = r1.send_4x1ftau_to_sim(actions)
         # ------ end control logic ------
         
         next_state = get_state(r1, d1)
-        replay_buffer.add(state, actions, next_state, False, False)
+        replay_buffer.add(state, actions, next_state, False, False, res)
         r1.log_time.append(time.time() - simulation_start)
         while time.time() - time_start < time_duration/len(x):
             state = get_state(r1, d1)
@@ -1327,18 +1327,39 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
                 (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
                 (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
             )
-            actions = r1.get_geometric_attitude_control_output(
-                f, R_d,
+           # ------ begin control logic ------
+            if next_state is None:
+                state = get_state(r1, d1)
+            else:
+                state = next_state
+            
+            f, R_d = r1.get_geometric_attitude_control_input(
+                np.array([x[i], y[i], z[i]]),
+                euler2quat(roll[i], pitch[i], yaw[i]),
+                np.array([roll[i], pitch[i], yaw[i]]),
                 (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
                 (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
             )
-            r1.send_4x1ftau_to_sim(actions)
+            """NOTE: flavor 1: take the desired thrust and roll, pitch, yaw angles as actions 
+            -- learning-based control WILL NOT bypass geometric control """
+            actions = r1.get_geometric_attitude_control_input_as_actions(f, R_d)
+            res = r1.send_4x1frpy_to_sim(actions)
+
+            """NOTE: flavor 2: take the desired thrust and torques as actions 
+            -- learning-based control WILL bypass geometric control """
+            # actions = r1.get_geometric_attitude_control_output(
+            #     f, R_d,
+            #     (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
+            #     (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
+            # )
+            # res = r1.send_4x1ftau_to_sim(actions)
+            # ------ end control logic ------
             r1.log_time.append(time.time() - simulation_start)
             print(time.time() - simulation_start)
             
             time.sleep(0.01)
             next_state = get_state(r1, d1)
-            replay_buffer.add(state, actions, next_state, False, False)
+            replay_buffer.add(state, actions, next_state, False, False, res)
             if (time.time() - simulation_start>cut_at):
                 break
     return replay_buffer
