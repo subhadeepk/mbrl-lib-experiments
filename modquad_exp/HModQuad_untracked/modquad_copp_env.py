@@ -18,7 +18,7 @@ class ModQuadEnv(gym.Env):
         self.target = None
         self.current_step = 0
         self.action_space = spaces.Box(
-            low=-10.0, high=10.0, shape=(6,), dtype=np.float32
+            low=-10.0, high=10.0, shape=(4,), dtype=np.float32
         )  # wrench: 3 force, 3 torque
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(12,), dtype=np.float32
@@ -111,7 +111,8 @@ class ModQuadEnv(gym.Env):
             target_ang_vel = np.array([self.droll[traj_step], self.dpitch[traj_step], self.dyaw[traj_step]])
 
         # action = np.clip(action, self.action_space.low, self.action_space.high)
-        self.robot.send_actions_to_sim(action)
+        
+        self.robot.send_4x1ftau_to_sim(action)
         time.sleep(self.dt)
         obs = self._get_obs()
         # Reward: negative distance between robot and target positions
@@ -141,59 +142,55 @@ class ModQuadEnv(gym.Env):
         replay_buffer_collector = mlb.collect_dynamics_training_data(self.robot, self.target)
         return replay_buffer_collector.get_all()
     
-    def run_gym_simulation(self, cut_at= 60, time_duration = 80):
+    def run_gym_simulation_and_collect_data(self, cut_at, time_duration = 80):
         
-        self.initialize_target_trajectory(traj = "random trajectory") 
+        replay_buffer = mlb.SimpleReplayBuffer()
+        trajectory_length, total_time, pos_traj, orient_traj = self.initialize_target_trajectory(traj = "random trajectory")   
+
+        obs, _ = self.reset()    
         
-       
-        all_rewards = [0]
-        trajectory_length, total_time, pos_traj, orient_traj = self.initialize_target_trajectory(traj = "random trajectory")
+        terminated = False
 
-        for trial in range(2):
+        traj_step = 0 
+        last_setpoint_set = time.time()
+        simulation_start = time.time()
+
+        # update_axes(axs, env.render(), ax_text, trial, steps_trial, all_rewards)
+        while not terminated or truncated:
+
+            if time.time() - last_setpoint_set > total_time/trajectory_length:
+                self.update_setpoint(traj_step)
+                last_setpoint_set = time.time()
+                traj_step += 1
+                # print(traj_step)
+
             
+
+            # --- Doing env step using the agent and adding to model dataset ---
+            action = self.robot.get_geometric_attitude_control_output(np.array([self.x[traj_step], self.y[traj_step], self.z[traj_step]]),
+                                                            mlb.euler2quat(self.roll[traj_step], self.pitch[traj_step], self.yaw[traj_step]),
+                                                            np.array([self.roll[traj_step], self.pitch[traj_step], self.yaw[traj_step]]),
+                                                            (np.array([self.dx[traj_step], self.dy[traj_step], self.dz[traj_step]]), 
+                                                                np.array([self.droll[traj_step], self.dpitch[traj_step], self.dyaw[traj_step]])),
+                                                            (np.array([self.ddx[traj_step], self.ddy[traj_step], self.ddz[traj_step]]), 
+                                                                np.array([self.ddroll[traj_step], self.ddpitch[traj_step], self.ddyaw[traj_step]])))
             
-            obs, _ = self.reset()    
+            next_obs, reward, terminated, truncated, _ = self.step(action, traj_step)
+
+            replay_buffer.add(obs, action, next_obs, reward, terminated, truncated)
+                
+            # update_axes(
+            #     axs, env.render(), ax_text, trial, steps_trial, all_rewards)
             
-            terminated = False
-            total_reward = 0.0
-            steps_trial = 0
+            obs = next_obs
 
-            traj_step = 0 
-            last_setpoint_set = time.time()
+            if (time.time() - simulation_start>cut_at):
+                break
 
-            # update_axes(axs, env.render(), ax_text, trial, steps_trial, all_rewards)
-            while not terminated or truncated:
+        self.end_simulation()
+        self.reset()
 
-                if time.time() - last_setpoint_set > total_time/trajectory_length:
-                    self.update_setpoint(traj_step)
-                    last_setpoint_set = time.time()
-                    traj_step += 1
-                    print(traj_step)
-
-                
-
-                # --- Doing env step using the agent and adding to model dataset ---
-                action = self.robot.get_pid_controller_actions(np.array([self.x[traj_step], self.y[traj_step], self.z[traj_step]]),
-                                                                mlb.euler2quat(self.roll[traj_step], self.pitch[traj_step], self.yaw[traj_step]),
-                                                                np.array([self.roll[traj_step], self.pitch[traj_step], self.yaw[traj_step]]),
-                                                                (np.array([self.dx[traj_step], self.dy[traj_step], self.dz[traj_step]]), 
-                                                                 np.array([self.droll[traj_step], self.dpitch[traj_step], self.dyaw[traj_step]])),
-                                                                (np.array([self.ddx[traj_step], self.ddy[traj_step], self.ddz[traj_step]]), 
-                                                                 np.array([self.ddroll[traj_step], self.ddpitch[traj_step], self.ddyaw[traj_step]])))
-                
-                next_obs, reward, terminated, truncated, _ = self.step(action, traj_step)
-                    
-                # update_axes(
-                #     axs, env.render(), ax_text, trial, steps_trial, all_rewards)
-                
-                obs = next_obs
-                total_reward += reward
-                print(total_reward)
-                steps_trial += 1
-
-            self.end_simulation()
-            self.reset()
-            all_rewards.append(total_reward)
+        return replay_buffer.get_all()
                 
 
 

@@ -20,8 +20,7 @@ class SimpleReplayBuffer:
     def __init__(self):
         self.data = []
 
-    def add(self, obs, action, next_obs, terminated, truncated):
-        reward = 0
+    def add(self, obs, action, next_obs, reward, terminated, truncated):
         self.data.append((obs, action, next_obs, reward, terminated, truncated))
 
     def __len__(self):
@@ -649,19 +648,27 @@ class Robot:
                        -kp_yaw * eR[2] + kd_yaw * eomega[2] - ki_yaw * self.PID.e_R_i[2]]) + alpha_des
 
         tau = self.PID.inertia * aR
+        action = [f, tau[0], tau[1], tau[2]]
 
-        return f, tau
+        return action
 
     def send_4x1ftau_to_sim(self, actions):
         """ Send the force and torque commands to the simulation.
-            :param f: Force scalar in the desired rotor thrust direction.
-            :param tau: Torque vector in the body frame.
+            :param actions: 4D action array [f, tau_x, tau_y, tau_z]
             :return: True if crash detected, False otherwise.
-            :note: This function assumes that the robot has 4 ADoF
+            :note: This function handles both 4 DoF and 5 DoF robots
         """
         R = quat2rot(self.get_quaternion())
-        four_by_one = np.array([actions[0], actions[1][0], actions[1][1], actions[1][2]])  # [f, tau_x, tau_y, tau_z]
-        u_crude = self.inv_A.dot(four_by_one)
+        
+        if self.controllability == 5:
+            # For 5 DoF robots, we need to add a 5th dimension (typically 0 for the missing DoF)
+            # The missing DoF is typically the yaw rate, so we set it to 0
+            wrench_5d = np.array([actions[0], actions[1], actions[2], actions[3], 0.0])  # [f, tau_x, tau_y, tau_z, 0]
+            u_crude = self.inv_A.dot(wrench_5d)
+        else:
+            # For 6 DoF robots, use the original 4D approach
+            four_by_one = np.array([actions[0], actions[1], actions[2], actions[3]])  # [f, tau_x, tau_y, tau_z]
+            u_crude = self.inv_A.dot(four_by_one)
 
         if not (u_crude >= 0).all() and (self.ns > 0).all():
             min_force_div = 0
