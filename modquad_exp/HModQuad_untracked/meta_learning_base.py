@@ -650,6 +650,41 @@ class Robot:
         return np.array([f, tau[0], tau[1], tau[2]])
     
 
+    def send_4x1frpy_to_sim(self, actions):
+        """ Send the force and torque commands to the simulation.
+            :param f: Force scalar in the desired rotor thrust direction.
+            :param tau: Torque vector in the body frame.
+            :return: True if crash detected, False otherwise.
+            :note: This function assumes that the robot has 4 ADoF
+        """
+        R_d = quat2rot(euler2quat(actions[1], actions[2], actions[3]))  # Convert roll, pitch, yaw to rotation matrix
+        f = actions[0]  # Force scalar in the desired rotor thrust direction
+        ftau_actions = self.get_geometric_attitude_control_output(f, R_d, des_vel=None, des_acc=None)
+
+        u = self.send_4x1ftau_to_sim(ftau_actions)
+        # print("u: {}".format(u))
+        self.log_u.append(u)
+        R = quat2rot(self.get_quaternion())
+        self.log_th.append(R.dot([0, 0, actions[0]]))  # actions[0] is the force scalar
+        self.log_tor.append(actions[1])
+        crash = self.crash_check()
+        if crash:
+            return True
+        else:
+            return False
+        
+    def get_geometric_attitude_control_input_as_actions(self, f, R_d):
+        """ Get the geometric attitude control input (force and desired roll, pitch, yaw) based on 
+            the force thrust and the desired rotation matrix.
+            :param f: Force scalar in the desired rotor thrust direction.
+            :param R_d: Desired rotation matrix for translation.
+            :return: Force scalar in the desired rotor thrust direction 
+                    and desired roll pitch yaw angles.
+            :NOTE: This function assumes no singularity"""
+        roll, pitch, yaw = rot2rpy(R_d)
+        return np.array([f, roll, pitch, yaw])
+    
+    
     def send_4x1ftau_to_sim(self, actions):
         """ Send the force and torque commands to the simulation.
             :param f: Force scalar in the desired rotor thrust direction.
@@ -684,20 +719,6 @@ class Robot:
             return True
         else:
             return False
-        
-    def get_geometric_attitude_control_input_as_actions(self, des_pos, des_quat, rpy_d, des_vel=None, des_acc=None):
-        """ Get the geometric attitude control output (force and torque) based on 
-            desired position, orientation, and velocity.
-            :param des_pos: Desired position in the world frame.
-            :param des_quat: Desired orientation in quaternion form, used only for full actuation.
-            :param rpy_d: Desired roll, pitch, yaw angles.
-            :param des_vel: Optional desired linear and angular velocity in the world frame.
-            :param des_acc: Optional desired linear and angular acceleration in the world frame.
-            :return: Force scalar in the desired rotor thrust direction 
-                    and torque vector in the body frame."""
-        f, R_d = self.get_geometric_attitude_control_input(des_pos, des_quat, rpy_d, des_vel, des_acc)
-        roll, pitch, yaw = rot2rpy(R_d)
-        return np.array([f, roll, pitch, yaw])
 
 class PID_param:
     def __init__(self, mass, inertia, KZ, KX, KY, KR, KP, KYAW):
@@ -847,7 +868,7 @@ def state_to_state_traj(x1, x2, v1, v2, acc1, acc2, delta_t):
     return state_extractor(min_snap_coeff(x1, x2, v1, v2, acc1, acc2, delta_t), t)
 
 
-def piecewise3D (X, Y, Z, Vx, Vy, Vz, Accx, Accy, Accz, T, num_points):
+def piecewise3D(X, Y, Z, Vx, Vy, Vz, Accx, Accy, Accz, T, num_points):
     x, y, z, dx, dy, dz, ddx, ddy, ddz = [], [], [], [], [], [], [], [], []
 
     for i in range(num_points-1):
@@ -1273,6 +1294,7 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
             state = get_state(r1, d1)
         else:
             state = next_state
+        
         f, R_d = r1.get_geometric_attitude_control_input(
             np.array([x[i], y[i], z[i]]),
             euler2quat(roll[i], pitch[i], yaw[i]),
@@ -1280,25 +1302,25 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
             (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
             (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
         )
-        actions = r1.get_geometric_attitude_control_output(
-            f, R_d,
-            (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
-            (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
-        )
-        r1.send_4x1ftau_to_sim(actions)
+        """NOTE: flavor 1: take the desired thrust and roll, pitch, yaw angles as actions 
+        -- learning-based control WILL NOT bypass geometric control """
+        actions = r1.get_geometric_attitude_control_input_as_actions(f, R_d)
+        r1.send_4x1frpy_to_sim(actions)
 
-        actions = r1.get_geometric_attitude_control_input_as_actions(np.array([x[i], y[i], z[i]]),
-            euler2quat(roll[i], pitch[i], yaw[i]),
-            np.array([roll[i], pitch[i], yaw[i]]),
-            (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
-            (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]])))
+        """NOTE: flavor 2: take the desired thrust and torques as actions 
+        -- learning-based control WILL bypass geometric control """
+        # actions = r1.get_geometric_attitude_control_output(
+        #     f, R_d,
+        #     (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
+        #     (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
+        # )
+        # r1.send_4x1ftau_to_sim(actions)
+        # ------ end control logic ------
         
         next_state = get_state(r1, d1)
         replay_buffer.add(state, actions, next_state, False, False)
         r1.log_time.append(time.time() - simulation_start)
         while time.time() - time_start < time_duration/len(x):
-        # while time.time() - simulation_start < 70:
-
             state = get_state(r1, d1)
             f, R_d = r1.get_geometric_attitude_control_input(
                 np.array([x[i], y[i], z[i]]),
