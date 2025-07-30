@@ -469,5 +469,7 @@ class Ensemble(Model, abc.ABC):
             model_input, rng=rng, propagation_indices=model_state["propagation_indices"]
         )
         variances = logvars.exp()
+        # Ensure variances are positive to avoid numerical issues
+        variances = torch.clamp(variances, min=1e-6)
         stds = torch.sqrt(variances)
         return torch.normal(means, stds, generator=rng), model_state

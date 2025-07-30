@@ -20,8 +20,7 @@ class SimpleReplayBuffer:
     def __init__(self):
         self.data = []
 
-    def add(self, obs, action, next_obs, terminated, truncated):
-        reward = 0
+    def add(self, obs, action, next_obs, reward, terminated, truncated):
         self.data.append((obs, action, next_obs, reward, terminated, truncated))
 
     def __len__(self):
@@ -687,10 +686,9 @@ class Robot:
     
     def send_4x1ftau_to_sim(self, actions):
         """ Send the force and torque commands to the simulation.
-            :param f: Force scalar in the desired rotor thrust direction.
-            :param tau: Torque vector in the body frame.
+            :param actions: 4D action array [f, tau_x, tau_y, tau_z]
             :return: True if crash detected, False otherwise.
-            :note: This function assumes that the robot has 4 ADoF
+            :note: This function handles both 4 DoF and 5 DoF robots
         """
         R = quat2rot(self.get_quaternion())
         u_crude = self.inv_A.dot(actions)

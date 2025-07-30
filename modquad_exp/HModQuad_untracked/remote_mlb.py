@@ -37,7 +37,7 @@ def connect_run_disconnect():
             g = 9.81
             
                 
-            replay_buffer = mlb.collect_dynamics_training_data(r1, d1)
+            replay_buffer = mlb.collect_dynamics_training_data(r1, d1, cut_at=60)
 
                 
 
