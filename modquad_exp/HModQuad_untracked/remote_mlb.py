@@ -25,12 +25,12 @@ def connect_run_disconnect():
                 ['/propeller{}'.format(i+1) for i in range(8)],
                 mlb.PID_param(
                     mass=0.32, inertia=0.03,
-                    KZ=(5.0, 3.5, 0.0),
-                KX=(2.0, 3.0, 0.0),
-                KY=(0.2, 0.6, 0.0),
-                KR=(1.5, 0.8, 0.0),
-                KP=(0.8, 0.6, 0.0),
-                KYAW=(-0.6, -0.5, 0.0)
+                    KZ=(5.0, 3.5, 0.2),
+                KX=(4.8, 5.8, 0.0),
+                KY=(1.45, 2.0, 0.0),
+                KR=(16.0, 7.0, 0.0),
+                KP=(1.25, 0.6, 0.0),
+                KYAW=(-1.0, -0.8, 0.0)
                 )
             )
             d1 = mlb.Robot('DesiredBox', client_id)

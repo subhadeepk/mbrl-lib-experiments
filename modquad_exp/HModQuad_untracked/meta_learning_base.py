@@ -605,14 +605,13 @@ class Robot:
         # the position control and the required orientation for translation
         return force_thrust, R_d
     
-    def get_geometric_attitude_control_output(self, des_pos, des_quat, rpy_d, des_vel=None, des_acc=None):
+    def get_geometric_attitude_control_output(self, f, R_d, des_vel=None, des_acc=None):
         """ Get the geometric attitude control output (force and torque) based on 
             desired position, orientation, and velocity.
-            :param des_pos: Desired position in the world frame.
-            :param des_quat: Desired orientation in quaternion form, used only for full actuation.
-            :param rpy_d: Desired roll, pitch, yaw angles.
-            :param des_vel: Optional desired linear and angular velocity in the world frame.
-            :param des_acc: Optional desired linear and angular acceleration in the world frame.
+            :param f: Force scalar in the desired rotor thrust direction.
+            :param R_d: Desired rotation matrix for translation.
+            :param des_vel: Optional desired linear velocity in the world frame and angular velocity in the body frame.
+            :param des_acc: Optional desired linear acceleration in the world frame and angular acceleration in the body frame.
             :return: Force scalar in the desired rotor thrust direction 
                     and torque vector in the body frame."""
         # getting the geometric attitude control input from the position controller
@@ -622,10 +621,9 @@ class Robot:
         if des_vel:
             _, omega_d = des_vel
         if des_acc:
-            _, omega_d = des_acc
+            _, alpha_des = des_acc
 
         _, omega = self.get_velocity()
-        f, R_d = self.get_geometric_attitude_control_input(des_pos, des_quat, rpy_d, des_vel, des_acc)
         R = quat2rot(self.get_quaternion())
 
         eR = 0.5 * vee_map(R_d.T.dot(R.dot(self.Rsf)) - (R.dot(self.Rsf)).T.dot(R_d))
@@ -648,9 +646,8 @@ class Robot:
                        -kp_yaw * eR[2] + kd_yaw * eomega[2] - ki_yaw * self.PID.e_R_i[2]]) + alpha_des
 
         tau = self.PID.inertia * aR
-        action = [f, tau[0], tau[1], tau[2]]
-
-        return action
+        return np.array([f, tau[0], tau[1], tau[2]])
+    
 
     def send_4x1ftau_to_sim(self, actions):
         """ Send the force and torque commands to the simulation.
@@ -659,16 +656,7 @@ class Robot:
             :note: This function handles both 4 DoF and 5 DoF robots
         """
         R = quat2rot(self.get_quaternion())
-        
-        if self.controllability == 5:
-            # For 5 DoF robots, we need to add a 5th dimension (typically 0 for the missing DoF)
-            # The missing DoF is typically the yaw rate, so we set it to 0
-            wrench_5d = np.array([actions[0], actions[1], actions[2], actions[3], 0.0])  # [f, tau_x, tau_y, tau_z, 0]
-            u_crude = self.inv_A.dot(wrench_5d)
-        else:
-            # For 6 DoF robots, use the original 4D approach
-            four_by_one = np.array([actions[0], actions[1], actions[2], actions[3]])  # [f, tau_x, tau_y, tau_z]
-            u_crude = self.inv_A.dot(four_by_one)
+        u_crude = self.inv_A.dot(actions)
 
         if not (u_crude >= 0).all() and (self.ns > 0).all():
             min_force_div = 0
@@ -695,18 +683,19 @@ class Robot:
         else:
             return False
         
-        
-    def extract_geometric_control_input(self, force_Rd):
-        """ Send the force and torque commands to the simulation.
-            :param f: Force scalar in the desired rotor thrust direction.
-            :param tau: Torque vector in the body frame.
-            :return: True if crash detected, False otherwise.
-            :note: This function assumes that the robot has 4 ADoF
-        """
-        force_thrust, R_d = force_Rd  # force_thrust is the force scalar in the desired rotor thrust direction
+    def get_geometric_attitude_control_input_as_actions(self, des_pos, des_quat, rpy_d, des_vel=None, des_acc=None):
+        """ Get the geometric attitude control output (force and torque) based on 
+            desired position, orientation, and velocity.
+            :param des_pos: Desired position in the world frame.
+            :param des_quat: Desired orientation in quaternion form, used only for full actuation.
+            :param rpy_d: Desired roll, pitch, yaw angles.
+            :param des_vel: Optional desired linear and angular velocity in the world frame.
+            :param des_acc: Optional desired linear and angular acceleration in the world frame.
+            :return: Force scalar in the desired rotor thrust direction 
+                    and torque vector in the body frame."""
+        f, R_d = self.get_geometric_attitude_control_input(des_pos, des_quat, rpy_d, des_vel, des_acc)
         roll, pitch, yaw = rot2rpy(R_d)
-        crash = self.crash_check()
-        return crash, force_thrust, np.array([roll, pitch, yaw])
+        return np.array([f, roll, pitch, yaw])
 
 class PID_param:
     def __init__(self, mass, inertia, KZ, KX, KY, KR, KP, KYAW):
@@ -742,7 +731,7 @@ def rot2rpy(R):
     sy = np.sqrt(R[0,0] ** 2 + R[1,0] ** 2)
     singular = sy < 1e-6
     if singular:
-        warnings.warn("Singularity detected: pitch is near +-90 degrees (gimbal lock). Results may be inaccurate.")
+        print("Singularity detected: pitch is near +-90 degrees (gimbal lock). Results may be inaccurate.")
         roll = np.arctan2(-R[1,2], R[1,1])
         pitch = np.arctan2(-R[2,0], sy)
         yaw = 0
@@ -1185,13 +1174,14 @@ def generate_training_trajectory(
     start_pos=[0.0, 0.0, 1.0], start_yaw=0.0, 
     start_vel=[0.0, 0.0, 0.0], start_yaw_rate=0.0,
     std_position_change=0.2,
-    std_orientation_change=0.0,
+    std_orientation_change=0.1,
     std_velocity_change=0.05,
     std_angular_velocity_change=0.0,
     std_acceleration_change=0.0,
     std_angular_acceleration_change=0.0,
     num_waypoints=20, 
-    num_time_step=5):
+    num_hover_points=3,
+    time_step_duration=5):
     """
     Generates position and orientation trajectories using piecewise3D.
 
@@ -1201,7 +1191,9 @@ def generate_training_trajectory(
     """
     # get trajectory
     # Waypoints
-    total_points = 2 + num_waypoints
+    total_points = num_hover_points + num_waypoints
+    start_pos = np.array(start_pos, dtype=float)
+    start_vel = np.array(start_vel, dtype=float)
     P = np.zeros((total_points, 3), dtype=float)        # position waypoints
     V = np.zeros((total_points, 3), dtype=float)        # velocity waypoints
     ACC = np.zeros((total_points, 3), dtype=float)      # acceleration waypoints
@@ -1209,15 +1201,16 @@ def generate_training_trajectory(
     OMEGA = np.zeros((total_points, 3), dtype=float)    # angular velocity waypoints
     ALPHA = np.zeros((total_points, 3), dtype=float)    # angular acceleration waypoints
 
-    P[:2, :] = np.array([[0, 0, 0.1], start_pos])
-    V[:2, :] = np.array([[0, 0, 0.0], start_vel])
-    TH[:2, :] = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, start_yaw]])
-    OMEGA[:2, :] = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, start_yaw_rate]])
-    for i in range(2, total_points):
+    P[:num_hover_points, :] = np.array([np.zeros(3)*(num_hover_points-i)/(num_hover_points-1) + start_pos*i/(num_hover_points-1) for i in range(num_hover_points)])
+    V[:num_hover_points, :] = np.array([np.zeros(3)*(num_hover_points-i)/(num_hover_points-1) + start_vel*i/(num_hover_points-1) for i in range(num_hover_points)])
+    TH[:num_hover_points, :] = np.array([np.zeros(3)*(num_hover_points-i)/(num_hover_points-1) + np.array([0.0, 0.0, start_yaw])*i/(num_hover_points-1) for i in range(num_hover_points)])
+    OMEGA[:num_hover_points, :] = np.array([np.zeros(3)*(num_hover_points-i)/(num_hover_points-1) + np.array([0.0, 0.0, start_yaw_rate])*i/(num_hover_points-1) for i in range(num_hover_points)])
+    print(P, V, TH, OMEGA)
+    for i in range(num_hover_points, total_points):
         noise = np.random.normal(loc=0.0, scale=std_position_change, size=3)
         tentative_pos = P[i - 1] + noise
-        if tentative_pos[2] < 0.2:
-            tentative_pos[2] = 0.2
+        if tentative_pos[2] < 0.5:
+            tentative_pos[2] = 0.5
         P[i] = tentative_pos
         V[i] = V[i - 1] + np.random.normal(loc=0.0, scale=std_velocity_change, size=3)
         ACC[i] = ACC[i - 1] + np.random.normal(loc=0.0, scale=std_acceleration_change, size=3)
@@ -1233,10 +1226,10 @@ def generate_training_trajectory(
     omegar, omegap, omegay = OMEGA[:, 0], OMEGA[:, 1], OMEGA[:, 2]
     alphar, alphap, alphay = ALPHA[:, 0], ALPHA[:, 1], ALPHA[:, 2]
 
-    time_duration = (num_waypoints + 2)*num_time_step
+    time_duration = (num_waypoints + num_hover_points)*time_step_duration
     T = np.linspace(0, time_duration, total_points)
+    print(T)
 
-        
     pos_traj = piecewise3D(X, Y, Z, Vx, Vy, Vz, Accx, Accy, Accz, T, num_waypoints)
     orient_traj = piecewise3D(rolls, pitchs, yaws, omegar, omegap, omegay, alphar, alphap, alphay, T, num_waypoints)
     return pos_traj, orient_traj, time_duration
@@ -1263,6 +1256,7 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
     pos_traj, orient_traj, time_duration = generate_training_trajectory()  # generates trajectory for the first 40 seconds
     x, y, z, dx, dy, dz, ddx, ddy, ddz = pos_traj
     roll, pitch, yaw, droll, dpitch, dyaw, ddroll, ddpitch, ddyaw = orient_traj
+    next_state = None
 
     for i in range(len(x)):
         time_start = time.time()
@@ -1272,15 +1266,31 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
         d1.log_angles.append(np.array([roll[i], pitch[i], yaw[i]]))
         d1.log_time.append(time.time() - simulation_start)
 
-        state = get_state(r1, d1)
-        actions = r1.get_geometric_attitude_control_output(
+        # ------ begin control logic ------
+        if next_state is None:
+            state = get_state(r1, d1)
+        else:
+            state = next_state
+        f, R_d = r1.get_geometric_attitude_control_input(
             np.array([x[i], y[i], z[i]]),
             euler2quat(roll[i], pitch[i], yaw[i]),
             np.array([roll[i], pitch[i], yaw[i]]),
             (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
             (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
         )
+        actions = r1.get_geometric_attitude_control_output(
+            f, R_d,
+            (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
+            (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
+        )
         r1.send_4x1ftau_to_sim(actions)
+
+        actions = r1.get_geometric_attitude_control_input_as_actions(np.array([x[i], y[i], z[i]]),
+            euler2quat(roll[i], pitch[i], yaw[i]),
+            np.array([roll[i], pitch[i], yaw[i]]),
+            (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
+            (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]])))
+        
         next_state = get_state(r1, d1)
         replay_buffer.add(state, actions, next_state, False, False)
         r1.log_time.append(time.time() - simulation_start)
@@ -1288,10 +1298,15 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
         # while time.time() - simulation_start < 70:
 
             state = get_state(r1, d1)
-            actions = r1.get_geometric_attitude_control_output(
+            f, R_d = r1.get_geometric_attitude_control_input(
                 np.array([x[i], y[i], z[i]]),
                 euler2quat(roll[i], pitch[i], yaw[i]),
                 np.array([roll[i], pitch[i], yaw[i]]),
+                (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
+                (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
+            )
+            actions = r1.get_geometric_attitude_control_output(
+                f, R_d,
                 (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
                 (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
             )
