@@ -269,7 +269,7 @@ class Robot:
 
         for i in range(len(self.motors)):
             motor_id = self.motors[i]
-            print(motor_id)
+            # print(motor_id)
             res, quat_i = sim.simxGetObjectQuaternion(self.client_id, motor_id, self.frame,
                                                     sim.simx_opmode_blocking)
             # print(res)
@@ -330,7 +330,7 @@ class Robot:
         #     self.Rsf = np.eye(3)
 
         self.Rsf = np.eye(3)
-        print(design_matrix)
+        # print(design_matrix)
         self.controllability = np.linalg.matrix_rank(self.A, tol=1e-3)
         if self.controllability == 6:
             self.inv_A = np.linalg.pinv(self.A)
@@ -690,6 +690,7 @@ class Robot:
             :note: This function handles 4 DoF robots
         """
         R = quat2rot(self.get_quaternion())
+        # print(actions)
         u_crude = self.inv_A.dot(actions)
 
         if not (u_crude >= 0).all() and (self.ns > 0).all():
@@ -716,6 +717,16 @@ class Robot:
             return True
         else:
             return False
+        
+    def pause_simulation(self):
+        """Pause the CoppeliaSim simulation."""
+        sim.simxPauseSimulation(self.client_id, sim.simx_opmode_oneshot)
+        # print("Simulation paused")
+
+    def resume_simulation(self):
+        """Resume the CoppeliaSim simulation."""
+        sim.simxStartSimulation(self.client_id, sim.simx_opmode_oneshot)
+        # print("Simulation resumed")
 
 class PID_param:
     def __init__(self, mass, inertia, KZ, KX, KY, KR, KP, KYAW):
@@ -1201,7 +1212,7 @@ def generate_training_trajectory(
     std_angular_acceleration_change=0.0,
     num_waypoints=20, 
     num_hover_points=3,
-    time_step_duration=5):
+    time_step_duration=10):
     """
     Generates position and orientation trajectories using piecewise3D.
 
@@ -1225,7 +1236,7 @@ def generate_training_trajectory(
     V[:num_hover_points, :] = np.array([np.zeros(3)*(num_hover_points-i)/(num_hover_points-1) + start_vel*i/(num_hover_points-1) for i in range(num_hover_points)])
     TH[:num_hover_points, :] = np.array([np.zeros(3)*(num_hover_points-i)/(num_hover_points-1) + np.array([0.0, 0.0, start_yaw])*i/(num_hover_points-1) for i in range(num_hover_points)])
     OMEGA[:num_hover_points, :] = np.array([np.zeros(3)*(num_hover_points-i)/(num_hover_points-1) + np.array([0.0, 0.0, start_yaw_rate])*i/(num_hover_points-1) for i in range(num_hover_points)])
-    print(P, V, TH, OMEGA)
+    # print(P, V, TH, OMEGA)
     for i in range(num_hover_points, total_points):
         noise = np.random.normal(loc=0.0, scale=std_position_change, size=3)
         tentative_pos = P[i - 1] + noise

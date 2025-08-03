@@ -112,7 +112,7 @@ class ModQuadEnv(gym.Env):
 
         # action = np.clip(action, self.action_space.low, self.action_space.high)
         
-        self.robot.send_4x1ftau_to_sim(action)
+        crash = self.robot.send_4x1frpy_to_sim(action)
         time.sleep(self.dt)
         obs = self._get_obs()
         # Reward: negative distance between robot and target positions
@@ -124,7 +124,7 @@ class ModQuadEnv(gym.Env):
             reward = 0
             terminated = False
         
-        truncated = self.robot.crash_check()
+        truncated = crash
         info = {}
         return obs, reward, terminated, truncated, info
 
@@ -167,13 +167,18 @@ class ModQuadEnv(gym.Env):
             
 
             # --- Doing env step using the agent and adding to model dataset ---
-            action = self.robot.get_geometric_attitude_control_output(np.array([self.x[traj_step], self.y[traj_step], self.z[traj_step]]),
+            f, R_d = self.robot.get_geometric_attitude_control_input(np.array([self.x[traj_step], self.y[traj_step], self.z[traj_step]]),
                                                             mlb.euler2quat(self.roll[traj_step], self.pitch[traj_step], self.yaw[traj_step]),
                                                             np.array([self.roll[traj_step], self.pitch[traj_step], self.yaw[traj_step]]),
                                                             (np.array([self.dx[traj_step], self.dy[traj_step], self.dz[traj_step]]), 
                                                                 np.array([self.droll[traj_step], self.dpitch[traj_step], self.dyaw[traj_step]])),
                                                             (np.array([self.ddx[traj_step], self.ddy[traj_step], self.ddz[traj_step]]), 
                                                                 np.array([self.ddroll[traj_step], self.ddpitch[traj_step], self.ddyaw[traj_step]])))
+            
+            """NOTE: flavor 1: take the desired thrust and roll, pitch, yaw angles as actions 
+            -- learning-based control WILL NOT bypass geometric control """
+            action = self.robot.get_geometric_attitude_control_input_as_actions(f, R_d)
+            
             
             next_obs, reward, terminated, truncated, _ = self.step(action, traj_step)
 
@@ -210,6 +215,21 @@ class ModQuadEnv(gym.Env):
         self.target.set_position(np.array([self.x[traj_step], self.y[traj_step], self.z[traj_step]]))
         self.target.set_orientation(np.array([self.roll[traj_step], self.pitch[traj_step], self.yaw[traj_step]]))
 
+    def pause_simulation(self):
+        """Pause the simulation during planning/learning phases."""
+        if self.robot:
+            self.robot.pause_simulation()
+        else:
+            mlb.sim.simxPauseSimulation(self.client_id, mlb.sim.simx_opmode_blocking)
+        # print("Simulation paused")
+
+    def resume_simulation(self):
+        """Resume the simulation after planning/learning phases."""
+        if self.robot:
+            self.robot.resume_simulation()
+        else:
+            mlb.sim.simxStartSimulation(self.client_id, mlb.sim.simx_opmode_blocking)
+        # print("Simulation resumed")
 
 
 
