@@ -176,7 +176,8 @@ class modquad_ModelEnv:
             total_rewards = torch.zeros(batch_size, 1).to(self.device)
             terminated = torch.zeros(batch_size, 1, dtype=bool).to(self.device)
             for time_step in range(horizon):
-                planning_step = self.trajectory_step + time_step + 1
+                # Fix: Ensure planning_step doesn't exceed trajectory bounds
+                planning_step = min(self.trajectory_step + time_step + 1, self.num_waypoints - 1)
                 action_for_step = action_sequences[:, time_step, :]
                 action_batch = torch.repeat_interleave(
                     action_for_step, num_particles, dim=0
@@ -204,6 +205,8 @@ class modquad_ModelEnv:
         Calculates the reward for the current planning step, for all the particles in the batch.
         The reward is the sum of the absolute differences between the desired and predicted observations.
         """
+        # Fix: Ensure planning_step doesn't exceed trajectory bounds
+        planning_step = min(planning_step, self.num_waypoints - 1)
         desired_obs = self.desired_trajectory[planning_step]
         desired_obs = desired_obs.reshape(-1, 12)
         desired_obs = torch.from_numpy(desired_obs).to(self.device)
@@ -215,7 +218,9 @@ class modquad_ModelEnv:
         """
         if the planning step is the last waypoint index, then the episode is terminated.
         """
-        if planning_step == self.num_waypoints:
+        # Fix: Ensure planning_step doesn't exceed trajectory bounds
+        planning_step = min(planning_step, self.num_waypoints - 1)
+        if planning_step >= self.num_waypoints - 1:
             return torch.ones(actions.shape[0], 1, dtype=bool).to(self.device)
         else:
             return torch.zeros(actions.shape[0], 1, dtype=bool).to(self.device)

@@ -602,11 +602,12 @@ def step_env_and_add_to_buffer(
         agent_obs = getattr(env, "get_last_low_dim_obs")()
     else:
         agent_obs = obs
-    env.pause_simulation()
+    # env.pause_simulation()
     action = agent.act(agent_obs, **agent_kwargs)
-    env.resume_simulation()
+    # env.resume_simulation()
     next_obs, reward, terminated, truncated, info = env.step(action)
     replay_buffer.add(obs, action, next_obs, reward, terminated, truncated)
+    print("action: ", action, "reward: ", reward)
     if callback:
         callback((obs, action, next_obs, reward, terminated, truncated))
     return next_obs, reward, terminated, truncated, info

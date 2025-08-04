@@ -208,7 +208,7 @@ class modquad_ModelEnv:
         desired_obs = desired_obs.reshape(-1, 12)
         desired_obs = desired_obs.to(self.device)
         next_observs = next_observs.to(self.device)
-        reward = torch.sum(torch.abs(next_observs - desired_obs), dim=1)
+        reward = torch.sum(torch.abs(next_observs[:3] - desired_obs[:3]), dim=1)
         return reward
 
     def termination_fn(self, actions, next_observs, planning_step):

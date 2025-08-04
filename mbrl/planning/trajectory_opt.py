@@ -670,7 +670,7 @@ class TrajectoryOptimizerAgent(Agent):
         Returns:
             (np.ndarray): the action.
         """
-        print("in trajectory optimizer agent act")
+        # print("in trajectory optimizer agent act")
         
         if self.trajectory_eval_fn is None:
             raise RuntimeError(
