@@ -469,7 +469,6 @@ class Robot:
     def send_actions_to_sim(self, w):
         print("You should use another function: send_4x1ftau_to_sim instead for 4ADoF robots")
         assert False
-        # warnings.warn("You should use another function: send_4x1ftau_to_sim instead for 4ADoF robots", DeprecationWarning)
 
         R = quat2rot(self.get_quaternion())
         u_crude = self.inv_A.dot(self.D.dot(w))
@@ -871,18 +870,18 @@ def piecewiseCoeff3D(X, Y, Z, Vx, Vy, Vz, Accx, Accy, Accz, T, num_points):
 
 
 # state-to-state waypoint generator
-def state_to_state_traj(x1, x2, v1, v2, acc1, acc2, delta_t):
-    t = np.linspace(0, delta_t, 100)
+def state_to_state_traj(x1, x2, v1, v2, acc1, acc2, delta_t, num_samples=100):
+    t = np.linspace(0, delta_t, num_samples)
     return state_extractor(min_snap_coeff(x1, x2, v1, v2, acc1, acc2, delta_t), t)
 
 
-def piecewise3D(X, Y, Z, Vx, Vy, Vz, Accx, Accy, Accz, T, num_points):
+def piecewise3D(X, Y, Z, Vx, Vy, Vz, Accx, Accy, Accz, T, num_points, num_samples=100):
     x, y, z, dx, dy, dz, ddx, ddy, ddz = [], [], [], [], [], [], [], [], []
 
     for i in range(num_points-1):
-        xi, dxi, ddxi = state_to_state_traj(X[i], X[i+1], Vx[i], Vx[i+1], Accx[i], Accx[i+1], T[i+1] - T[i])
-        yi, dyi, ddyi = state_to_state_traj(Y[i], Y[i+1], Vy[i], Vy[i+1], Accy[i], Accy[i+1], T[i+1] - T[i])
-        zi, dzi, ddzi = state_to_state_traj(Z[i], Z[i+1], Vz[i], Vz[i+1], Accz[i], Accz[i+1], T[i+1] - T[i])
+        xi, dxi, ddxi = state_to_state_traj(X[i], X[i+1], Vx[i], Vx[i+1], Accx[i], Accx[i+1], T[i+1] - T[i], num_samples)
+        yi, dyi, ddyi = state_to_state_traj(Y[i], Y[i+1], Vy[i], Vy[i+1], Accy[i], Accy[i+1], T[i+1] - T[i], num_samples)
+        zi, dzi, ddzi = state_to_state_traj(Z[i], Z[i+1], Vz[i], Vz[i+1], Accz[i], Accz[i+1], T[i+1] - T[i], num_samples)
 
         x += xi.tolist()
         y += yi.tolist()
@@ -1202,17 +1201,18 @@ def get_state(r1, d1):
     return np.concatenate([pos1, ang1, vel1, ang_vel1]) #, pos2, ang2, vel2, ang_vel2])
 
 def generate_training_trajectory(
-    start_pos=[0.0, 0.0, 1.0], start_yaw=0.0, 
+    start_pos=[0.0, 0.0, 2.0], start_yaw=0.0, 
     start_vel=[0.0, 0.0, 0.0], start_yaw_rate=0.0,
-    std_position_change=0.2,
-    std_orientation_change=0.1,
-    std_velocity_change=0.05,
+    position_change_scale=1.0, fixed_pos_change_dist=True,
+    orientation_change_scale=0.1,
+    std_velocity_change=0.0,
     std_angular_velocity_change=0.0,
     std_acceleration_change=0.0,
     std_angular_acceleration_change=0.0,
     num_waypoints=20, 
     num_hover_points=3,
-    time_step_duration=10):
+    time_step_duration=20,
+    num_samples=3):
     """
     Generates position and orientation trajectories using piecewise3D.
 
@@ -1232,20 +1232,24 @@ def generate_training_trajectory(
     OMEGA = np.zeros((total_points, 3), dtype=float)    # angular velocity waypoints
     ALPHA = np.zeros((total_points, 3), dtype=float)    # angular acceleration waypoints
 
-    P[:num_hover_points, :] = np.array([np.zeros(3)*(num_hover_points-i)/(num_hover_points-1) + start_pos*i/(num_hover_points-1) for i in range(num_hover_points)])
+    P[:num_hover_points, :] = np.array([np.array([0, 0, 0.2])*(num_hover_points-i)/(num_hover_points-1) + start_pos*i/(num_hover_points-1) for i in range(num_hover_points)])
     V[:num_hover_points, :] = np.array([np.zeros(3)*(num_hover_points-i)/(num_hover_points-1) + start_vel*i/(num_hover_points-1) for i in range(num_hover_points)])
     TH[:num_hover_points, :] = np.array([np.zeros(3)*(num_hover_points-i)/(num_hover_points-1) + np.array([0.0, 0.0, start_yaw])*i/(num_hover_points-1) for i in range(num_hover_points)])
     OMEGA[:num_hover_points, :] = np.array([np.zeros(3)*(num_hover_points-i)/(num_hover_points-1) + np.array([0.0, 0.0, start_yaw_rate])*i/(num_hover_points-1) for i in range(num_hover_points)])
     # print(P, V, TH, OMEGA)
     for i in range(num_hover_points, total_points):
-        noise = np.random.normal(loc=0.0, scale=std_position_change, size=3)
+        if fixed_pos_change_dist:
+            noise = np.random.normal(size=3)
+            noise = noise / np.linalg.norm(noise) * position_change_scale
+        else:
+            noise = np.random.normal(loc=0.0, scale=position_change_scale, size=3)
         tentative_pos = P[i - 1] + noise
         if tentative_pos[2] < 0.5:
             tentative_pos[2] = 0.5
         P[i] = tentative_pos
         V[i] = V[i - 1] + np.random.normal(loc=0.0, scale=std_velocity_change, size=3)
         ACC[i] = ACC[i - 1] + np.random.normal(loc=0.0, scale=std_acceleration_change, size=3)
-        TH[i][2] = TH[i - 1][2] + np.random.normal(loc=0.0, scale=std_orientation_change, size=1)
+        TH[i][2] = TH[i - 1][2] + np.random.normal(loc=0.0, scale=orientation_change_scale, size=1)
         OMEGA[i][2] = OMEGA[i - 1][2] + np.random.normal(loc=0.0, scale=std_angular_velocity_change, size=1)
         ALPHA[i][2] = ALPHA[i - 1][2] + np.random.normal(loc=0.0, scale=std_angular_acceleration_change, size=1)
 
@@ -1259,11 +1263,12 @@ def generate_training_trajectory(
 
     time_duration = (num_waypoints + num_hover_points)*time_step_duration
     T = np.linspace(0, time_duration, total_points)
-    print(T)
+    # print(T)
 
-    pos_traj = piecewise3D(X, Y, Z, Vx, Vy, Vz, Accx, Accy, Accz, T, num_waypoints)
-    orient_traj = piecewise3D(rolls, pitchs, yaws, omegar, omegap, omegay, alphar, alphap, alphay, T, num_waypoints)
+    pos_traj = piecewise3D(X, Y, Z, Vx, Vy, Vz, Accx, Accy, Accz, T, num_waypoints, num_samples)
+    orient_traj = piecewise3D(rolls, pitchs, yaws, omegar, omegap, omegay, alphar, alphap, alphay, T, num_waypoints, num_samples)
     return pos_traj, orient_traj, time_duration
+
 
 def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
     """
@@ -1298,11 +1303,7 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
         d1.log_time.append(time.time() - simulation_start)
 
         # ------ begin control logic ------
-        if next_state is None:
-            state = get_state(r1, d1)
-        else:
-            state = next_state
-        
+        state = get_state(r1, d1)
         f, R_d = r1.get_geometric_attitude_control_input(
             np.array([x[i], y[i], z[i]]),
             euler2quat(roll[i], pitch[i], yaw[i]),
@@ -1337,12 +1338,7 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
                 (np.array([dx[i], dy[i], dz[i]]), np.array([droll[i], dpitch[i], dyaw[i]])),
                 (np.array([ddx[i], ddy[i], ddz[i]]), np.array([ddroll[i], ddpitch[i], ddyaw[i]]))
             )
-           # ------ begin control logic ------
-            if next_state is None:
-                state = get_state(r1, d1)
-            else:
-                state = next_state
-            
+            # ------ begin control logic ------
             f, R_d = r1.get_geometric_attitude_control_input(
                 np.array([x[i], y[i], z[i]]),
                 euler2quat(roll[i], pitch[i], yaw[i]),
@@ -1365,12 +1361,17 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
             res = r1.send_4x1ftau_to_sim(actions)
             # ------ end control logic ------
             r1.log_time.append(time.time() - simulation_start)
-            print(time.time() - simulation_start)
+            # print(time.time() - simulation_start)
             
-            time.sleep(0.01)
+            time.sleep(0.001)
             next_state = get_state(r1, d1)
             replay_buffer.add(state, actions, next_state, False, False, res)
             if (time.time() - simulation_start>cut_at):
+                break
+
+            if (np.linalg.norm(np.array([x[i], y[i], z[i]]) - r1.get_position()) < 0.05 and \
+               abs(yaw[i] - r1.get_orientation()[2]) < 0.05) and \
+                np.linalg.norm(r1.get_velocity()[0]) < 0.1:
                 break
     return replay_buffer
 
