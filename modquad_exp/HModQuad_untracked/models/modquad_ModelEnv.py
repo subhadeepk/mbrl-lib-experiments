@@ -211,7 +211,20 @@ class modquad_ModelEnv:
         desired_obs = desired_obs.reshape(-1, 12)
         desired_obs = torch.from_numpy(desired_obs).to(self.device)
         next_observs = next_observs.to(self.device)
-        reward = torch.sum(torch.abs(next_observs - desired_obs), dim=1)
+        # reward = torch.sum(torch.abs(next_observs - desired_obs), dim=1)
+        
+        
+        # # Extract only position components (indices 0-2 for x, y, z)
+        # desired_pos = desired_obs[:, :3]  # x, y, z position
+        predicted_pos = next_observs[:, :3]  # x, y, z position
+        
+        # # Calculate Euclidean distance between positions
+        # pos_diff = predicted_pos - desired_pos
+        # distance = torch.norm(pos_diff, dim=1)
+        
+        # Return negative distance as reward (closer = higher reward)
+        reward = torch.sum(torch.abs(predicted_pos), dim=1)
+    
         return reward.unsqueeze(1) #makes the reward dimensions (batch_size, 1 )
 
     def termination_fn(self, actions, next_observs, planning_step):
