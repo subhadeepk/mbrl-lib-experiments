@@ -176,7 +176,7 @@ class modquad_ModelEnv:
             total_rewards = torch.zeros(batch_size, 1).to(self.device)
             terminated = torch.zeros(batch_size, 1, dtype=bool).to(self.device)
             for time_step in range(horizon):
-                planning_step = self.trajectory_step + time_step + 1
+                planning_step = self.trajectory_step #+ time_step + 1
                 action_for_step = action_sequences[:, time_step, :]
                 action_batch = torch.repeat_interleave(
                     action_for_step, num_particles, dim=0
@@ -205,10 +205,17 @@ class modquad_ModelEnv:
         The reward is the sum of the absolute differences between the desired and predicted observations.
         """
         desired_obs = self.desired_trajectory[planning_step]
-        desired_obs = desired_obs.reshape(-1, 12)
+        desired_obs = desired_obs.reshape(-1, 10)
         desired_obs = desired_obs.to(self.device)
         next_observs = next_observs.to(self.device)
-        reward = torch.sum(torch.abs(next_observs[:3] - desired_obs[:3]), dim=1)
+
+        # reward = torch.sum(torch.abs(next_observs[:3] - desired_obs[:3]), dim=1)
+        # reward = torch.sum(torch.abs(next_observs[:, 0:3]), dim=1)
+
+        #Using euclidian norm
+        reward1 = - torch.norm(next_observs[:, 0:3], dim=1)
+        reward2 = - torch.norm(next_observs[:, 3:12] - desired_obs[:, 3:12], dim=1)
+        reward = 0.7*reward1 + 0.3*reward2
         return reward
 
     def termination_fn(self, actions, next_observs, planning_step):

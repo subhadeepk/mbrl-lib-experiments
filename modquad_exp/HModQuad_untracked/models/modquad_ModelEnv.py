@@ -7,6 +7,8 @@ from typing import Dict, Optional, Tuple
 import gymnasium as gym
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation as R
+
 
 import mbrl.types
 
@@ -44,6 +46,7 @@ class modquad_ModelEnv:
         # self.termination_fn = termination_fn
         # self.reward_fn = reward_fn
         self.device = model.device
+        self.dt = 0.01
 
         self.observation_space = env.observation_space
         self.action_space = env.action_space
@@ -51,6 +54,7 @@ class modquad_ModelEnv:
         self._current_obs: torch.Tensor = None
         self._propagation_method: Optional[str] = None
         self._model_indices = None
+        self.current_pos = None
         if generator:
             self._rng = generator
         else:
@@ -177,7 +181,8 @@ class modquad_ModelEnv:
             terminated = torch.zeros(batch_size, 1, dtype=bool).to(self.device)
             for time_step in range(horizon):
                 # Fix: Ensure planning_step doesn't exceed trajectory bounds
-                planning_step = min(self.trajectory_step + time_step + 1, self.num_waypoints - 1)
+                # planning_step = min(self.trajectory_step + time_step + 1, self.num_waypoints - 1)
+                planning_step = self.trajectory_step
                 action_for_step = action_sequences[:, time_step, :]
                 action_batch = torch.repeat_interleave(
                     action_for_step, num_particles, dim=0
@@ -197,37 +202,47 @@ class modquad_ModelEnv:
         self.x, self.y, self.z, self.dx, self.dy, self.dz, self.ddx, self.ddy, self.ddz = pos_traj
         self.roll, self.pitch, self.yaw, self.droll, self.dpitch, self.dyaw, self.ddroll, self.ddpitch, self.ddyaw = orient_traj
         self.num_waypoints = len(self.x)
-        trajectory = np.concatenate([self.x, self.y, self.z, self.roll, self.pitch, self.yaw, self.dx, self.dy, self.dz, self.droll, self.dpitch, self.dyaw])
-        self.desired_trajectory = trajectory.reshape(-1, 12)
+        print("x_shape", len(self.x))
+        trajectory = [self.x, self.y, self.z, self.roll, self.pitch, self.yaw, self.dx, self.dy, self.dz, self.droll, self.dpitch, self.dyaw]
+        self.desired_trajectory = np.array(trajectory).T
+        print("trajectory shape", self.desired_trajectory.shape)
+        # print(trajectory[0])
+        # self.desired_trajectory = trajectory.reshape(-1, 12)
+        # print("desired traj shape", self.desired_trajectory.shape)
 
-    def reward_fn(self,actions, next_observs, planning_step):
+    def _reward_fn(self,actions, next_observs, planning_step):
         """
         Calculates the reward for the current planning step, for all the particles in the batch.
         The reward is the sum of the absolute differences between the desired and predicted observations.
+        Trajectory structure: 
+        x=0, y=1, z=2, roll=3, pitch=4, yaw=5, dx=6, dy=7, dz=8, droll=9, dpitch=10, dyaw=11
+        Observation structure: dx=0, dy=1, dz=2, droll=3, dpitch=4, dyaw=5, quat=6,7,8,9
         """
-        # Fix: Ensure planning_step doesn't exceed trajectory bounds
-        planning_step = min(planning_step, self.num_waypoints - 1)
-        desired_obs = self.desired_trajectory[planning_step]
-        desired_obs = desired_obs.reshape(-1, 12)
+
+        desired_obs = self.desired_trajectory[self.trajectory_step]
         desired_obs = torch.from_numpy(desired_obs).to(self.device)
         next_observs = next_observs.to(self.device)
-        # reward = torch.sum(torch.abs(next_observs - desired_obs), dim=1)
-        
-        
-        # # Extract only position components (indices 0-2 for x, y, z)
-        # desired_pos = desired_obs[:, :3]  # x, y, z position
-        predicted_pos = next_observs[:, :3]  # x, y, z position
-        
-        # # Calculate Euclidean distance between positions
-        # pos_diff = predicted_pos - desired_pos
-        # distance = torch.norm(pos_diff, dim=1)
-        
-        # Return negative distance as reward (closer = higher reward)
-        reward = torch.sum(torch.abs(predicted_pos), dim=1)
-    
-        return reward.unsqueeze(1) #makes the reward dimensions (batch_size, 1 )
 
-    def termination_fn(self, actions, next_observs, planning_step):
+        diff = desired_obs - next_observs
+        # Step 1: L2 norm of first three elements of next_observs
+        l2_next_first3 = torch.norm(next_observs[:, :3], dim=1)  # shape (1000,)
+
+        # Step 2: L2 norm of certain elements of diff (e.g., indices 4, 6, 8)
+        cols = [3, 4, 5, 6, 7, 8, 9, 10, 11]
+        l2_diff_selected = torch.norm(diff[:, cols], dim=1)      # shape (1000,)
+
+        # Step 3: Weighted sum
+        w1, w2 = 0.5, 0.5
+        weighted_sum = w1 * l2_next_first3 + w2 * l2_diff_selected  # shape (1000,)
+
+        # Step 4: Expand to (batch size, 1)
+        reward = - weighted_sum.unsqueeze(1)
+
+    
+        return reward #makes the reward dimensions (batch_size, 1 )
+
+    def _termination_fn(self, actions, next_observs, planning_step):
+
         """
         if the planning step is the last waypoint index, then the episode is terminated.
         """
@@ -237,3 +252,92 @@ class modquad_ModelEnv:
             return torch.ones(actions.shape[0], 1, dtype=bool).to(self.device)
         else:
             return torch.zeros(actions.shape[0], 1, dtype=bool).to(self.device)
+        
+
+    def reward_fn(self, actions, next_observs, planning_step):
+        """
+        next_observs: [B, 10], actions: [B, A]  -> returns [B]
+        Higher is better.
+
+        Calculates the reward for the current planning step, for all the particles in the batch.
+        The reward is the sum of the absolute differences between the desired and predicted observations.
+        Trajectory structure: 
+        x=0, y=1, z=2, roll=3, pitch=4, yaw=5, dx=6, dy=7, dz=8, droll=9, dpitch=10, dyaw=11
+        Observation structure: dx=0, dy=1, dz=2, droll=3, dpitch=4, dyaw=5, quat=6,7,8,9
+        """
+        
+        device = self.device
+        B = next_observs.shape[0]
+        # print("next_observs shape", next_observs.shape)
+        # print("actions shape", actions.shape)
+
+        # Desired 12-D state at this step. If your trajectory stores one 12-D vector per step:
+        desired_obs = self.desired_trajectory[self.trajectory_step]
+        desired_obs = torch.from_numpy(desired_obs).to(self.device)
+
+        # next_observs_seq: [B, T, 10] (first 3 = velocities)
+        v = next_observs[:, :3]                          # [B, 3]
+        x0 = torch.from_numpy(self.current_pos).to(self.device)                            
+        pos = x0 + self.dt * v
+        # print("pos shape", pos.shape)
+        next_obs_euler = self.quat_xyzw_to_euler_zyx(next_observs[:, 6:10])  # [B, 3]
+
+        # Calculate errors for position, orientation, velocity, and angular velocity
+        position_error = torch.norm(pos - desired_obs[:3], dim=1)
+        orientation_error = torch.norm(next_obs_euler - desired_obs[3:6], dim=1)
+        velocity_error = torch.norm(next_observs[:, 0:3] - desired_obs[6:9], dim=1)
+        angular_velocity_error = torch.norm(next_observs[:, 3:6] - desired_obs[9:12], dim=1)
+
+        # Reward = negative cost
+        reward = -(position_error + orientation_error + velocity_error + angular_velocity_error)
+        # Ensure reward has shape (B, 1) for consistency
+        return reward.unsqueeze(1)
+    
+    def termination_fn(self, actions, next_observs, planning_step):
+        device = self.device
+        B = next_observs.shape[0]
+
+        vel = next_observs[:, 0:3]      
+        x0 = torch.from_numpy(self.current_pos).to(self.device)                            
+        pos = x0 + self.dt * vel
+        att   = self.quat_xyzw_to_euler_zyx(next_observs[:, 6:10])
+        rates = next_observs[:, 3:6]
+
+        # Bounds (adjust to your platform & safety)
+        # Position limits: [x_min, y_min, z_min], [x_max, y_max, z_max]
+        pos_lower = torch.tensor([-5.0, -2.0, 0], device=device)   # m
+        pos_upper = torch.tensor([5.0, 2.0, 2.0], device=device)      # m
+        
+        # Attitude limits: [roll_min, pitch_min, yaw_min], [roll_max, pitch_max, yaw_max]
+        att_lower = torch.tensor([-0.17, -0.37, -0.5], device=device)  # ~-34° for roll/pitch, -180° for yaw
+        att_upper = torch.tensor([0.17, 0.37, 0.5], device=device)     # ~34° for roll/pitch, 180° for yaw
+
+        # Velocity limits: [dx_min, dy_min, dz_min], [dx_max, dy_max, dz_max]
+        vel_lower = torch.tensor([-0.8, -0.4, -0.7], device=device)   # m/s
+        vel_upper = torch.tensor([0.8, 0.4, 0.7], device=device)      # m/s
+        
+        # Angular rates limits: [droll_min, dpitch_min, dyaw_min], [droll_max, dpitch_max, dyaw_max]
+        rates_lower = torch.tensor([-0.6, -0.6, -0.1], device=device)     # rad/s
+        rates_upper = torch.tensor([0.6, 0.6, 0.1], device=device)        # rad/s
+
+        bad = (
+            (pos < pos_lower).any(dim=1) | (pos > pos_upper).any(dim=1) |
+            (vel < vel_lower).any(dim=1) | (vel > vel_upper).any(dim=1) |
+            (att < att_lower).any(dim=1) | (att > att_upper).any(dim=1) |
+            (rates < rates_lower).any(dim=1) | (rates > rates_upper).any(dim=1)
+        )
+        # if bad.any():
+        #     print("bad", bad)
+        done_waypoints = self.trajectory_step >= (self.num_waypoints - 1)
+        done = (bad | done_waypoints).view(B, 1)
+        # done = (done_waypoints).view(B, 1)
+        # done = torch.ones(B, 1, dtype=bool).to(self.device)
+
+        return done
+    
+
+    def quat_xyzw_to_euler_zyx(self, q_xyzw: torch.Tensor, degrees: bool = False) -> torch.Tensor:
+        # q_xyzw: [..., 4] in (x, y, z, w). Kornia expects (w, x, y, z).
+        eulers = R.from_quat(q_xyzw.numpy()).as_euler('xyz', degrees=False)
+        eulers = torch.from_numpy(eulers)
+        return eulers

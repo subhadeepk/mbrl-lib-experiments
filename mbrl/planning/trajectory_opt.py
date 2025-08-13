@@ -163,13 +163,15 @@ class CEMOptimizer(Optimizer):
         """
         mu, dispersion = self._init_population_params(x0)
         best_solution = torch.empty_like(mu)
-        best_value = -np.inf
+        best_value = -np.inf # Should be changed to 0
         population = torch.zeros((self.population_size,) + x0.shape).to(
             device=self.device
         )
         for i in range(self.num_iterations):
             population = self._sample_population(mu, dispersion, population)
+            # print("sampled population", population[0])
             values = obj_fun(population)
+            # print("values", values)
 
             if callback is not None:
                 callback(population, values, i)
@@ -184,6 +186,8 @@ class CEMOptimizer(Optimizer):
             if best_values[0] > best_value:
                 best_value = best_values[0]
                 best_solution = population[elite_idx[0]].clone()
+
+            # print("best_value:", best_value)#, "best_solution:", best_solution)
 
         return mu if self.return_mean_elites else best_solution
 
@@ -607,7 +611,7 @@ class TrajectoryOptimizerAgent(Agent):
         action_ub: Sequence[float],
         planning_horizon: int = 1,
         replan_freq: int = 1,
-        verbose: bool = False,
+        verbose: bool = True,
         keep_last_solution: bool = True,
     ):
         self.optimizer = TrajectoryOptimizer(
