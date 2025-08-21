@@ -1269,6 +1269,123 @@ def generate_training_trajectory(
     orient_traj = piecewise3D(rolls, pitchs, yaws, omegar, omegap, omegay, alphar, alphap, alphay, T, num_waypoints, num_samples)
     return pos_traj, orient_traj, time_duration
 
+def generate_takeoff_trajectory(
+    start_pos=[0.0, 0.0, 0.0], start_yaw=0.0, 
+    start_vel=[0.0, 0.0, 0.0], start_yaw_rate=0.0,
+    takeoff_height=2.0, takeoff_duration=10.0,
+    hover_duration=5.0, num_waypoints=50, 
+    num_hover_points=10, time_step_duration=0.2,
+    num_samples=100):
+    """
+    Generates a takeoff trajectory for a robot from ground level to desired height.
+    
+    Args:
+        start_pos: Starting position [x, y, z] (default: ground level)
+        start_yaw: Starting yaw angle in radians
+        start_vel: Starting velocity [vx, vy, vz]
+        start_yaw_rate: Starting yaw rate
+        takeoff_height: Final height to reach after takeoff
+        takeoff_duration: Time duration for the takeoff phase
+        hover_duration: Time duration to hover at final height
+        num_waypoints: Number of waypoints for the entire trajectory
+        num_hover_points: Number of waypoints for hover phase
+        time_step_duration: Duration of each time step
+        num_samples: Number of samples for trajectory interpolation
+        
+    Returns:
+        pos_traj: (x, y, z, dx, dy, dz, ddx, ddy, ddz)
+        orient_traj: (roll, pitch, yaw, droll, dpitch, dyaw, ddroll, ddpitch, ddyaw)
+        time_duration: Total trajectory duration
+    """
+    # Calculate trajectory parameters
+    total_points = num_waypoints
+    takeoff_points = int(num_waypoints * takeoff_duration / (takeoff_duration + hover_duration))
+    hover_points = total_points - takeoff_points
+    
+    # Initialize trajectory arrays
+    P = np.zeros((total_points, 3), dtype=float)        # position waypoints
+    V = np.zeros((total_points, 3), dtype=float)        # velocity waypoints
+    ACC = np.zeros((total_points, 3), dtype=float)      # acceleration waypoints
+    TH = np.zeros((total_points, 3), dtype=float)       # orientation waypoints
+    OMEGA = np.zeros((total_points, 3), dtype=float)    # angular velocity waypoints
+    ALPHA = np.zeros((total_points, 3), dtype=float)    # angular acceleration waypoints
+    
+    # Set starting conditions
+    start_pos = np.array(start_pos, dtype=float)
+    start_vel = np.array(start_vel, dtype=float)
+    
+    # Generate takeoff phase (ground to target height)
+    for i in range(takeoff_points):
+        # Progress from 0 to 1
+        progress = i / (takeoff_points - 1) if takeoff_points > 1 else 0
+        
+        # Smooth takeoff using cubic easing function for natural motion
+        # This creates a smooth acceleration then deceleration profile
+        if progress <= 0.5:
+            # First half: accelerate
+            ease_factor = 2 * progress * progress
+        else:
+            # Second half: decelerate
+            ease_factor = 1 - 2 * (1 - progress) * (1 - progress)
+        
+        # Position: smooth transition from ground to target height
+        current_height = start_pos[2] + ease_factor * (takeoff_height - start_pos[2])
+        P[i] = np.array([start_pos[0], start_pos[1], current_height])
+        
+        # Velocity: bell-shaped profile for smooth takeoff
+        # Peak velocity at middle of takeoff
+        if progress <= 0.5:
+            velocity_scale = 2 * progress
+        else:
+            velocity_scale = 2 * (1 - progress)
+        
+        # Scale velocity based on height change and time
+        max_velocity = 2 * (takeoff_height - start_pos[2]) / takeoff_duration
+        V[i] = np.array([0.0, 0.0, max_velocity * velocity_scale])
+        
+        # Acceleration: derivative of velocity
+        if progress <= 0.5:
+            ACC[i] = np.array([0.0, 0.0, 2 * max_velocity / takeoff_duration])
+        else:
+            ACC[i] = np.array([0.0, 0.0, -2 * max_velocity / takeoff_duration])
+        
+        # Orientation: maintain level attitude during takeoff
+        TH[i] = np.array([0.0, 0.0, start_yaw])
+        OMEGA[i] = np.array([0.0, 0.0, start_yaw_rate])
+        ALPHA[i] = np.array([0.0, 0.0, 0.0])
+    
+    # Generate hover phase (maintain position at target height)
+    for i in range(takeoff_points, total_points):
+        # Maintain final takeoff position
+        P[i] = np.array([start_pos[0], start_pos[1], takeoff_height])
+        
+        # Zero velocity and acceleration during hover
+        V[i] = np.zeros(3)
+        ACC[i] = np.zeros(3)
+        
+        # Maintain orientation
+        TH[i] = np.array([0.0, 0.0, start_yaw])
+        OMEGA[i] = np.zeros(3)
+        ALPHA[i] = np.zeros(3)
+    
+    # Extract trajectory components
+    X, Y, Z = P[:, 0], P[:, 1], P[:, 2]
+    Vx, Vy, Vz = V[:, 0], V[:, 1], V[:, 2]
+    Accx, Accy, Accz = ACC[:, 0], ACC[:, 1], ACC[:, 2]
+    
+    rolls, pitchs, yaws = TH[:, 0], TH[:, 1], TH[:, 2]
+    omegar, omegap, omegay = OMEGA[:, 0], OMEGA[:, 1], OMEGA[:, 2]
+    alphar, alphap, alphay = ALPHA[:, 0], ALPHA[:, 1], ALPHA[:, 2]
+    
+    # Calculate total time duration
+    time_duration = total_points * time_step_duration
+    T = np.linspace(0, time_duration, total_points)
+    
+    # Generate smooth trajectories using piecewise3D
+    pos_traj = piecewise3D(X, Y, Z, Vx, Vy, Vz, Accx, Accy, Accz, T, num_waypoints, num_samples)
+    orient_traj = piecewise3D(rolls, pitchs, yaws, omegar, omegap, omegay, alphar, alphap, alphay, T, num_waypoints, num_samples)
+    
+    return pos_traj, orient_traj, time_duration
 
 def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
     """

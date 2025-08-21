@@ -102,9 +102,11 @@ class CEMOptimizer(Optimizer):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         mean = x0.clone()
         if self._clipped_normal:
+            # dispersion = torch.tensor([0.21335, 0.02606, 0.11626, 0.109], device=self.device)
             dispersion = torch.ones_like(mean)
         else:
-            dispersion = ((self.upper_bound - self.lower_bound) ** 2) / 16
+            # dispersion = torch.tensor([0.04552245, 0.00067928, 0.01352939, 0.0118663], device=self.device)
+            dispersion = ((self.upper_bound - self.lower_bound) ** 2) / 64
         return mean, dispersion
 
     def _sample_population(
@@ -137,6 +139,8 @@ class CEMOptimizer(Optimizer):
             new_dispersion = torch.var(elite, dim=0)
         mu = self.alpha * mu + (1 - self.alpha) * new_mu
         dispersion = self.alpha * dispersion + (1 - self.alpha) * new_dispersion
+        # print("mu", mu)
+        # print("dispersion", dispersion)
         return mu, dispersion
 
     def optimize(
@@ -187,7 +191,7 @@ class CEMOptimizer(Optimizer):
                 best_value = best_values[0]
                 best_solution = population[elite_idx[0]].clone()
 
-            # print("best_value:", best_value)#, "best_solution:", best_solution)
+        # print("best_value:", best_value, "best_solution:", best_solution)
 
         return mu if self.return_mean_elites else best_solution
 
@@ -679,7 +683,7 @@ class TrajectoryOptimizerAgent(Agent):
         if self.trajectory_eval_fn is None:
             raise RuntimeError(
                 "Please call `set_trajectory_eval_fn()` before using TrajectoryOptimizerAgent"
-            )
+            ) 
         plan_time = 0.0
         if not self.actions_to_use:  # re-plan is necessary
 

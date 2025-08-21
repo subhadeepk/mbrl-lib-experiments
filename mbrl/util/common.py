@@ -568,7 +568,7 @@ def step_env_and_add_to_buffer(
     agent_kwargs: Dict,
     replay_buffer: ReplayBuffer,
     callback: Optional[Callable] = None,
-    agent_uses_low_dim_obs: bool = False,
+    agent_uses_low_dim_obs: bool = False
 ) -> Tuple[np.ndarray, float, bool, bool, Dict]:
     """Steps the environment with an agent's action and populates the replay buffer.
 
@@ -605,8 +605,12 @@ def step_env_and_add_to_buffer(
     # env.pause_simulation()
     action = agent.act(agent_obs, **agent_kwargs)
     # env.resume_simulation()
+    env.last_action = action
+    action = [action[0], 0, 0, 0]
     next_obs, reward, terminated, truncated, info = env.step(action)
+    
     replay_buffer.add(obs, action, next_obs, reward, terminated, truncated)
+    # print("state: ", obs, "action: ", action, "next_obs: ", next_obs, "reward: ", reward)
     print("action: ", action, "reward: ", reward)
     if callback:
         callback((obs, action, next_obs, reward, terminated, truncated))

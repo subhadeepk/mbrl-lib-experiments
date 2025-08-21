@@ -2,7 +2,7 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Any, List
 
 import gymnasium as gym
 import numpy as np
@@ -13,6 +13,7 @@ from scipy.spatial.transform import Rotation as R
 import mbrl.types
 
 from . import Model
+from modquad_logger import ModQuadLogger
 
 
 class modquad_ModelEnv:
@@ -41,12 +42,15 @@ class modquad_ModelEnv:
         env: gym.Env,
         model: Model,
         generator: Optional[torch.Generator] = None,
+        enable_logging: bool = True,
     ):
         self.dynamics_model = model
         # self.termination_fn = termination_fn
         # self.reward_fn = reward_fn
         self.device = model.device
+        print(model.device)
         self.dt = 0.01
+        self._int_pos = None
 
         self.observation_space = env.observation_space
         self.action_space = env.action_space
@@ -61,6 +65,18 @@ class modquad_ModelEnv:
             self._rng = torch.Generator(device=self.device)
         self._return_as_np = True
         self.trajectory_step = 0
+        self.u_hover = torch.tensor([3.24433114,0,0,0], device=self.device)
+        self.last_action_taken = None
+        # Logging control
+        self.enable_logging = enable_logging
+        
+        # Initialize logger only if logging is enabled
+        if self.enable_logging:
+            self.logger = ModQuadLogger(log_dir="modquad_model_logs", enable_file_logging=True)
+            print(f"ModQuad logging enabled. Logs will be saved to: modquad_model_logs/")
+        else:
+            self.logger = None
+            print("ModQuad logging disabled.")
 
     def reset(
         self, initial_obs_batch: np.ndarray, return_as_np: bool = True
@@ -85,6 +101,25 @@ class modquad_ModelEnv:
                 initial_obs_batch.astype(np.float32), rng=self._rng
             )
         self._return_as_np = return_as_np
+
+            # ---- NEW: initialize per-particle integrated position ----
+        if self.current_pos is None:
+            raise RuntimeError("Set self.current_pos (np.array shape [3,]) before calling reset/evaluate.")
+
+        B = initial_obs_batch.shape[0]  # num_particles * population_size
+        pos0 = torch.from_numpy(self.current_pos).to(self.device).expand(B, 3).clone()
+
+        if model_state is None:
+            model_state = {}
+        model_state["int_pos"] = pos0    # track absolute position per particle
+        self._int_pos = pos0             # keep a copy for reward/termination
+        # Initialize last_action as a Bx4 tensor, broadcasting from last_action_taken if available
+        if self.last_action_taken is not None:
+            last_action_tensor = torch.tensor(self.last_action_taken).to(self.device)
+            self.last_action = last_action_tensor.expand(B, -1)  # Broadcast to [B, 4]
+        else:
+            self.last_action = torch.zeros(B, 4).to(self.device)
+
         return model_state if model_state is not None else {}
 
     def step(
@@ -92,7 +127,7 @@ class modquad_ModelEnv:
         actions: mbrl.types.TensorType,
         model_state: Dict[str, torch.Tensor],
         sample: bool = False,
-        planning_step: int = 0,
+        horizon_step: int = 0,
     ) -> Tuple[mbrl.types.TensorType, mbrl.types.TensorType, np.ndarray, Dict]:
         """Steps the model environment with the given batch of actions.
 
@@ -125,18 +160,58 @@ class modquad_ModelEnv:
                 deterministic=not sample,
                 rng=self._rng,
             )
+
+            # ---- NEW: integrate per-particle position using predicted linear velocity ----
+            # next_observs layout: [dx, dy, dz, droll, dpitch, dyaw, qx, qy, qz, qw]
+            v_lin = next_observs[:, 0:3]  # [B,3]
+            if "int_pos" not in model_state:
+                # Safety init (should already exist if reset did its job)
+                B = v_lin.shape[0]
+                pos0 = torch.from_numpy(self.current_pos).to(self.device).expand(B, 3).clone()
+                model_state["int_pos"] = pos0
+            
+
+            prev_pos = model_state["int_pos"]              # [B,3]
+            next_pos = prev_pos + self.dt * v_lin          # [B,3]
+            next_model_state["int_pos"] = next_pos         # carry forward
+            self._int_pos = next_pos                       # expose to reward/termination
+            # self.current_thrust = actions[:,0]
+            # print("int_pos", self._int_pos[:,2].max(), self._int_pos[:,2].min())
+
+            # Compute Euler once here and stash (you already do this in reward_fn; either place works)
+            # If you prefer to leave it in reward_fn, you can skip this.
+            # q_xyzw = next_observs[:, 6:10]
+            # self.next_obs_euler = self.quat_xyzw_to_euler_xyz_torch(q_xyzw)
+
+
             rewards = (
                 pred_rewards
                 if self.reward_fn is None
-                else self.reward_fn(actions, next_observs, planning_step)
+                else self.reward_fn(actions, next_observs, horizon_step)
             )
-            dones = self.termination_fn(actions, next_observs, planning_step)
+            dones = self.termination_fn(actions, next_observs, horizon_step)
 
             if pred_terminals is not None:
                 raise NotImplementedError(
                     "ModelEnv doesn't yet support simulating terminal indicators."
                 )
 
+            # Log the model step (only if logging is enabled)
+            if self.enable_logging and self.logger is not None:
+                self.logger.log_model_step(
+                    actions=actions,
+                    observations=actions,  # We don't have current obs, using actions as placeholder
+                    rewards=rewards,
+                    dones=dones,
+                    model_state=next_model_state,
+                    planning_step=planning_step,
+                    trajectory_step=self.trajectory_step,
+                    next_observations=next_observs,
+                    predicted_rewards=pred_rewards,
+                    predicted_terminals=pred_terminals
+                )
+            self.last_action = actions.detach()
+            
             if self._return_as_np:
                 next_observs = next_observs.cpu().numpy()
                 rewards = rewards.cpu().numpy()
@@ -145,6 +220,107 @@ class modquad_ModelEnv:
 
     def render(self, mode="human"):
         pass
+    
+    def start_trajectory_logging(self, trial_number: int = 0):
+        """Start logging a new trajectory"""
+        if self.enable_logging and self.logger is not None:
+            return self.logger.start_trajectory(trial_number)
+        else:
+            print("Logging is disabled. Cannot start trajectory logging.")
+            return -1
+    
+    def end_trajectory_logging(self, success: bool, termination_reason: str, 
+                              waypoints_reached: int, total_waypoints: int, 
+                              final_reward: float = 0.0):
+        """End logging the current trajectory"""
+        if self.enable_logging and self.logger is not None:
+            self.logger.end_trajectory(success, termination_reason, waypoints_reached, 
+                                      total_waypoints, final_reward)
+        else:
+            print("Logging is disabled. Cannot end trajectory logging.")
+    
+    def log_planning_time(self, planning_time: float):
+        """Log planning time for the current trajectory step"""
+        if self.enable_logging and self.logger is not None:
+            self.logger.log_planning_time(planning_time)
+    
+    def log_step_reward(self, reward: float):
+        """Log reward for the current trajectory step"""
+        if self.enable_logging and self.logger is not None:
+            self.logger.log_step_reward(reward)
+    
+    def log_trajectory_step(self, trajectory_step: int):
+        """Log the current trajectory step progression"""
+        if self.enable_logging and self.logger is not None:
+            self.logger.log_trajectory_step(trajectory_step)
+    
+    def log_cem_iteration(self, metrics: Dict[str, Any]):
+        """Log CEM iteration metrics"""
+        if self.enable_logging and self.logger is not None:
+            self.logger.log_cem_iteration(metrics)
+    
+    def log_experiment_parameters(self, cem_params: Dict[str, Any], 
+                                 model_params: Dict[str, Any],
+                                 planning_params: Dict[str, Any],
+                                 env_params: Dict[str, Any]):
+        """Log experiment configuration parameters"""
+        if self.enable_logging and self.logger is not None:
+            self.logger.log_experiment_parameters(cem_params, model_params, planning_params, env_params)
+    
+    def start_trial_logging(self, trial_number: int):
+        """Start logging a new trial"""
+        if self.enable_logging and self.logger is not None:
+            self.logger.start_trial(trial_number)
+    
+    def log_planning_step(self, trial_number: int, planning_step: int,
+                          best_predicted_reward: float, top_k_rewards: List[float],
+                          top_k_average_reward: float, num_cem_iterations: int,
+                          cem_converged: bool, actual_action_taken: List[float],
+                          simulator_reward: float, planning_time: float,
+                          population_evolution: Dict[str, Any]):
+        """Log a complete planning step within a trial"""
+        if self.enable_logging and self.logger is not None:
+            self.logger.log_planning_step(
+                trial_number, planning_step, best_predicted_reward, top_k_rewards,
+                top_k_average_reward, num_cem_iterations, cem_converged,
+                actual_action_taken, simulator_reward, planning_time, population_evolution
+            )
+    
+    def end_trial_logging(self, trial_number: int, success: bool, termination_reason: str,
+                          waypoints_reached: int, total_waypoints: int, total_reward: float):
+        """End logging the current trial"""
+        if self.enable_logging and self.logger is not None:
+            self.logger.end_trial(trial_number, success, termination_reason,
+                                 waypoints_reached, total_waypoints, total_reward)
+    
+    def get_logger(self):
+        """Get the logger instance for external access"""
+        if self.enable_logging and self.logger is not None:
+            return self.logger
+        else:
+            print("Logging is disabled. No logger available.")
+            return None
+    
+    def enable_logging(self, enable: bool = True):
+        """Enable or disable logging dynamically"""
+        if enable and not self.enable_logging:
+            # Enable logging
+            self.enable_logging = True
+            if self.logger is None:
+                self.logger = ModQuadLogger(log_dir="modquad_model_logs", enable_file_logging=True)
+                print("ModQuad logging enabled. Logs will be saved to: modquad_model_logs/")
+            else:
+                print("ModQuad logging already enabled.")
+        elif not enable and self.enable_logging:
+            # Disable logging
+            self.enable_logging = False
+            print("ModQuad logging disabled.")
+        else:
+            print(f"Logging is already {'enabled' if enable else 'disabled'}.")
+    
+    def is_logging_enabled(self) -> bool:
+        """Check if logging is currently enabled"""
+        return self.enable_logging and self.logger is not None
 
     def evaluate_action_sequences(
         self,
@@ -188,15 +364,23 @@ class modquad_ModelEnv:
                     action_for_step, num_particles, dim=0
                 )
                 _, rewards, dones, model_state = self.step(
-                    action_batch, model_state, sample=True, planning_step=planning_step
+                    action_batch, model_state, sample=True, horizon_step=time_step
                 )
                 rewards[terminated] = 0
                 terminated |= dones
                 total_rewards += rewards
 
             total_rewards = total_rewards.reshape(-1, num_particles)
+            
+            # Log the model evaluation (only if logging is enabled)
+            if self.enable_logging and self.logger is not None:
+                self.logger.log_model_evaluation(
+                    action_sequences=action_sequences,
+                    total_rewards=total_rewards,
+                    num_particles=num_particles
+                )
+            
             return total_rewards.mean(dim=1)
-
 
     def set_desired_trajectory(self, total_time, pos_traj, orient_traj):
         self.x, self.y, self.z, self.dx, self.dy, self.dz, self.ddx, self.ddy, self.ddz = pos_traj
@@ -209,118 +393,41 @@ class modquad_ModelEnv:
         # print(trajectory[0])
         # self.desired_trajectory = trajectory.reshape(-1, 12)
         # print("desired traj shape", self.desired_trajectory.shape)
-
-    def _reward_fn(self,actions, next_observs, planning_step):
-        """
-        Calculates the reward for the current planning step, for all the particles in the batch.
-        The reward is the sum of the absolute differences between the desired and predicted observations.
-        Trajectory structure: 
-        x=0, y=1, z=2, roll=3, pitch=4, yaw=5, dx=6, dy=7, dz=8, droll=9, dpitch=10, dyaw=11
-        Observation structure: dx=0, dy=1, dz=2, droll=3, dpitch=4, dyaw=5, quat=6,7,8,9
-        """
-
-        desired_obs = self.desired_trajectory[self.trajectory_step]
-        desired_obs = torch.from_numpy(desired_obs).to(self.device)
-        next_observs = next_observs.to(self.device)
-
-        diff = desired_obs - next_observs
-        # Step 1: L2 norm of first three elements of next_observs
-        l2_next_first3 = torch.norm(next_observs[:, :3], dim=1)  # shape (1000,)
-
-        # Step 2: L2 norm of certain elements of diff (e.g., indices 4, 6, 8)
-        cols = [3, 4, 5, 6, 7, 8, 9, 10, 11]
-        l2_diff_selected = torch.norm(diff[:, cols], dim=1)      # shape (1000,)
-
-        # Step 3: Weighted sum
-        w1, w2 = 0.5, 0.5
-        weighted_sum = w1 * l2_next_first3 + w2 * l2_diff_selected  # shape (1000,)
-
-        # Step 4: Expand to (batch size, 1)
-        reward = - weighted_sum.unsqueeze(1)
-
-    
-        return reward #makes the reward dimensions (batch_size, 1 )
-
-    def _termination_fn(self, actions, next_observs, planning_step):
-
-        """
-        if the planning step is the last waypoint index, then the episode is terminated.
-        """
-        # Fix: Ensure planning_step doesn't exceed trajectory bounds
-        planning_step = min(planning_step, self.num_waypoints - 1)
-        if planning_step >= self.num_waypoints - 1:
-            return torch.ones(actions.shape[0], 1, dtype=bool).to(self.device)
-        else:
-            return torch.zeros(actions.shape[0], 1, dtype=bool).to(self.device)
-        
-
-    def reward_fn(self, actions, next_observs, planning_step):
-        """
-        next_observs: [B, 10], actions: [B, A]  -> returns [B]
-        Higher is better.
-
-        Calculates the reward for the current planning step, for all the particles in the batch.
-        The reward is the sum of the absolute differences between the desired and predicted observations.
-        Trajectory structure: 
-        x=0, y=1, z=2, roll=3, pitch=4, yaw=5, dx=6, dy=7, dz=8, droll=9, dpitch=10, dyaw=11
-        Observation structure: dx=0, dy=1, dz=2, droll=3, dpitch=4, dyaw=5, quat=6,7,8,9
-        """
-        
-        device = self.device
-        B = next_observs.shape[0]
-        # print("next_observs shape", next_observs.shape)
-        # print("actions shape", actions.shape)
-
-        # Desired 12-D state at this step. If your trajectory stores one 12-D vector per step:
-        desired_obs = self.desired_trajectory[self.trajectory_step]
-        desired_obs = torch.from_numpy(desired_obs).to(self.device)
-
-        # next_observs_seq: [B, T, 10] (first 3 = velocities)
-        v = next_observs[:, :3]                          # [B, 3]
-        x0 = torch.from_numpy(self.current_pos).to(self.device)                            
-        pos = x0 + self.dt * v
-        # print("pos shape", pos.shape)
-        next_obs_euler = self.quat_xyzw_to_euler_zyx(next_observs[:, 6:10])  # [B, 3]
-
-        # Calculate errors for position, orientation, velocity, and angular velocity
-        position_error = torch.norm(pos - desired_obs[:3], dim=1)
-        orientation_error = torch.norm(next_obs_euler - desired_obs[3:6], dim=1)
-        velocity_error = torch.norm(next_observs[:, 0:3] - desired_obs[6:9], dim=1)
-        angular_velocity_error = torch.norm(next_observs[:, 3:6] - desired_obs[9:12], dim=1)
-
-        # Reward = negative cost
-        reward = -(position_error + orientation_error + velocity_error + angular_velocity_error)
-        # Ensure reward has shape (B, 1) for consistency
-        return reward.unsqueeze(1)
-    
+   
     def termination_fn(self, actions, next_observs, planning_step):
         device = self.device
         B = next_observs.shape[0]
 
-        vel = next_observs[:, 0:3]      
-        x0 = torch.from_numpy(self.current_pos).to(self.device)                            
-        pos = x0 + self.dt * vel
-        att   = self.quat_xyzw_to_euler_zyx(next_observs[:, 6:10])
+        if self._int_pos is None:
+            # Fallback (shouldn't happen if step ran)
+            vel = next_observs[:, 0:3]
+            x0 = torch.from_numpy(self.current_pos).to(device)
+            pos = x0 + self.dt * vel
+        else:
+            pos = self._int_pos  # [B,3]
+        vel = next_observs[:, 0:3]                                 
+        att   = self.next_obs_euler #(next_observs[:, 6:10])
         rates = next_observs[:, 3:6]
 
         # Bounds (adjust to your platform & safety)
         # Position limits: [x_min, y_min, z_min], [x_max, y_max, z_max]
-        pos_lower = torch.tensor([-5.0, -2.0, 0], device=device)   # m
-        pos_upper = torch.tensor([5.0, 2.0, 2.0], device=device)      # m
+        pos_lower = torch.tensor([-10.0, -10.0, 0], device=device)   # m
+        pos_upper = torch.tensor([10.0, 10.0, 5.0], device=device)      # m
         
         # Attitude limits: [roll_min, pitch_min, yaw_min], [roll_max, pitch_max, yaw_max]
         att_lower = torch.tensor([-0.17, -0.37, -0.5], device=device)  # ~-34° for roll/pitch, -180° for yaw
         att_upper = torch.tensor([0.17, 0.37, 0.5], device=device)     # ~34° for roll/pitch, 180° for yaw
 
         # Velocity limits: [dx_min, dy_min, dz_min], [dx_max, dy_max, dz_max]
-        vel_lower = torch.tensor([-0.8, -0.4, -0.7], device=device)   # m/s
-        vel_upper = torch.tensor([0.8, 0.4, 0.7], device=device)      # m/s
+        vel_lower = torch.tensor([-0.8, -0.51, -0.51], device=device)   # m/s
+        vel_upper = torch.tensor([0.8, 0.4, 1.3], device=device)      # m/s
         
         # Angular rates limits: [droll_min, dpitch_min, dyaw_min], [droll_max, dpitch_max, dyaw_max]
-        rates_lower = torch.tensor([-0.6, -0.6, -0.1], device=device)     # rad/s
-        rates_upper = torch.tensor([0.6, 0.6, 0.1], device=device)        # rad/s
+        rates_lower = torch.tensor([-0.37, -0.9, -0.1], device=device)     # rad/s
+        rates_upper = torch.tensor([0.37, 0.9, 0.09], device=device)        # rad/s
 
         bad = (
+            # (pos[:,2] > self.desired_trajectory[self.trajectory_step][2]) |
             (pos < pos_lower).any(dim=1) | (pos > pos_upper).any(dim=1) |
             (vel < vel_lower).any(dim=1) | (vel > vel_upper).any(dim=1) |
             (att < att_lower).any(dim=1) | (att > att_upper).any(dim=1) |
@@ -335,9 +442,178 @@ class modquad_ModelEnv:
 
         return done
     
-
     def quat_xyzw_to_euler_zyx(self, q_xyzw: torch.Tensor, degrees: bool = False) -> torch.Tensor:
         # q_xyzw: [..., 4] in (x, y, z, w). Kornia expects (w, x, y, z).
         eulers = R.from_quat(q_xyzw.numpy()).as_euler('xyz', degrees=False)
         eulers = torch.from_numpy(eulers)
         return eulers
+    
+    def quat_xyzw_to_euler_xyz_torch(self, q_xyzw: torch.Tensor) -> torch.Tensor:
+        """
+        Converts a batch of quaternions (x, y, z, w) to a batch of Euler angles (yaw, pitch, roll).
+        The input is expected to be in x, y, z, w format.
+        The output is in zyx (yaw, pitch, roll) format.
+        
+        Args:
+            q_xyzw: A torch.Tensor of shape (B, 4) representing quaternions.
+            
+        Returns:
+            A torch.Tensor of shape (B, 3) representing Euler angles.
+        """
+        x, y, z, w = q_xyzw.unbind(dim=-1)
+        
+        # Calculate roll (rotation around x-axis)
+        t0 = +2.0 * (w * x + y * z)
+        t1 = +1.0 - 2.0 * (x * x + y * y)
+        roll_x = torch.atan2(t0, t1)
+        
+        # Calculate pitch (rotation around y-axis)
+        t2 = +2.0 * (w * y - z * x)
+        t2 = torch.clamp(t2, -1.0, 1.0)
+        pitch_y = torch.asin(t2)
+        
+        # Calculate yaw (rotation around z-axis)
+        t3 = +2.0 * (w * z + x * y)
+        t4 = +1.0 - 2.0 * (y * y + z * z)
+        yaw_z = torch.atan2(t3, t4)
+        
+        eulers = torch.stack((roll_x, pitch_y, yaw_z ), dim=-1)
+        return eulers
+    
+    def _angle_wrap(self, a: torch.Tensor) -> torch.Tensor:
+        # Wrap to (-pi, pi]
+        return (a + np.pi) % (2 * np.pi) - np.pi
+
+    def _squared_l2(self, x: torch.Tensor) -> torch.Tensor:
+        return (x ** 2).sum(dim=1)  # [B]
+
+    # --- Latest reward function ---
+    def reward_fn(self, actions, next_observs, planning_step):
+        """
+        next_observs: [B, 10]
+        layout: [dx, dy, dz, droll, dpitch, dyaw, qx, qy, qz, qw]
+        desired_trajectory row layout (12):
+        [x, y, z, roll, pitch, yaw, dx, dy, dz, droll, dpitch, dyaw]
+        Returns: [B, 1] (higher is better)
+        """
+
+        device = self.device
+        B = next_observs.shape[0]
+        ground_truth_pos = self.current_pos 
+        ground_truth_velocity = self.current_velocity
+        # print("horizon step", planning_step)
+
+
+        ht_error_now = abs(ground_truth_pos[2] - self.desired_trajectory[self.trajectory_step][2])
+        velocity_error_now = abs(ground_truth_velocity[2] - self.desired_trajectory[self.trajectory_step][6])
+        if velocity_error_now < 0.02 and ht_error_now < 0.1:
+            w_u = 100
+            print("stabilize now")
+        else:
+            w_u = 0.0
+
+        pos = self._int_pos
+
+        # if pos_error_now < 0.1:
+        #     w_p = 0.0
+        # else:
+        #     w_p = 5.0
+        
+        # if velocity_error_now < 0.05 or pos_error_now < 0.2:
+        #     w_v = 0.0
+        # else:
+        #     w_v = 1.0
+
+        # print(self.last_action[0], actions[0])
+
+        # --- weights (tune as needed) ---
+        w_p   = 3.0     # position
+        w_v   = 0.1   # linear velocity
+        w_att = 0.0 #2.0   # attitude (roll, pitch, yaw)
+        w_w   = 0.0 #0.3   # body rates
+        # w_u   = 0.0 #0.05  # control effort (around hover)
+        w_du  = 0.1  #0.001 #0.025 #0.15   # control smoothness
+        w_prog = 0.0
+        
+        # --- position error threshold for zeroing w_p ---
+        pos_threshold = 0.1  # meters - adjust this value as needed
+        velocity_threshold = 0.01  # m/s - adjust this value as needed
+        # Desired 12-D state at this planning step
+        desired = torch.from_numpy(self.desired_trajectory[self.trajectory_step]).to(device)  # [12]
+        
+        # Parse observation
+        v_lin   = next_observs[:, 0:3]    # [B,3] dx,dy,dz
+        w_body  = next_observs[:, 3:6]    # [B,3] droll,dpitch,dyaw
+        q_xyzw  = next_observs[:, 6:10]   # [B,4] x,y,z,w
+
+        # One-step position estimate around current_pos (as you had)
+        x0 = torch.from_numpy(self.current_pos).to(device)  # [3]
+                               # [B,3]
+
+        # Euler from quaternion. Your function returns [roll, pitch, yaw]
+        eul = self.quat_xyzw_to_euler_xyz_torch(q_xyzw)     # [B,3]
+        self.next_obs_euler = eul                           # keep for termination_fn
+
+        # Desired splits
+        p_ref   = desired[0:3]      # [3]
+        att_ref = desired[3:6]      # [3] roll, pitch, yaw
+        v_ref   = desired[6:9]      # [3]
+        w_ref   = desired[9:12]     # [3]
+
+        # Errors (wrap angles for attitude)
+        e_p   = p_ref - pos                    # [B,3]
+        e_v   = v_lin - v_ref                  # [B,3]
+        e_att = self._angle_wrap(eul - att_ref)  # [B,3]
+        e_w   = w_body - w_ref                 # [B,3]   <-- FIX vs your old code
+        e_du  = actions - self.last_action    # [B,4]
+
+        # print("e_p avg", e_p[2].mean())
+        # print("e_v avg", e_v[2].mean())
+        # print("e_att avg", e_att[2].mean())
+        # print("e_w avg", e_w[2].mean())
+        # --- adaptive position weight based on error magnitude ---
+        pos_error_magnitude = torch.abs(e_p[:, 2])  # [B] - Z-axis position error
+        velocity_error_magnitude = torch.abs(e_v[:, 2])  # [B] - Z-axis velocity error
+
+        # make scalars tensors once
+        w_p_t  = torch.tensor(w_p,  device=device)
+        w_v_t  = torch.tensor(w_v,  device=device)
+        w_att_t= torch.tensor(w_att,device=device)
+        w_w_t  = torch.tensor(w_w,  device=device)
+
+        w_p_adaptive = torch.where(
+            pos_error_magnitude <= pos_threshold,
+            torch.tensor(0.0, device=device),
+            w_p_t
+        )
+        w_v_adaptive = torch.where(
+            pos_error_magnitude <= pos_threshold,
+            w_v_t,
+            torch.tensor(0.0, device=device)
+        )
+
+        # effort/smoothness only when settled
+        w_du_adaptive = torch.where(
+            (pos_error_magnitude <= pos_threshold) & (velocity_error_magnitude <= velocity_threshold),
+            torch.tensor(w_du, device=device),
+            torch.tensor(0.0, device=device)
+        )
+        w_u_adaptive = torch.where(
+            (pos_error_magnitude <= pos_threshold) & (velocity_error_magnitude <= velocity_threshold),
+            torch.tensor(w_u, device=device),
+            torch.tensor(0.0, device=device)
+        )
+
+        # --- use the adaptive weights here ---
+        cost = (
+            w_p * self._squared_l2(e_p) +
+            w_v * self._squared_l2(e_v) +
+            w_att_t      * self._squared_l2(e_att) +
+            w_w_t        * self._squared_l2(e_w)
+        )
+
+        cost = cost + w_du * self._squared_l2(e_du)
+        reward = -cost
+        
+        return reward.unsqueeze(1)
+    
