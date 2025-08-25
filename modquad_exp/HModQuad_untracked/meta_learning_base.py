@@ -31,7 +31,7 @@ class SimpleReplayBuffer:
 
 
 class Robot:
-    def __init__(self, frame_name,  client_id, motor_names=None, control_param=None):
+    def __init__(self, frame_name, client_id, motor_names=None, control_param=None):
 
         self.frame_name = frame_name
         # If there is an existing connection
@@ -1201,6 +1201,7 @@ def get_state(r1, d1):
     return np.concatenate([pos1, ang1, vel1, ang_vel1]) #, pos2, ang2, vel2, ang_vel2])
 
 def generate_training_trajectory(
+    traj_type='random_walk',
     start_pos=[0.0, 0.0, 2.0], start_yaw=0.0, 
     start_vel=[0.0, 0.0, 0.0], start_yaw_rate=0.0,
     position_change_scale=1.0, fixed_pos_change_dist=True,
@@ -1212,7 +1213,7 @@ def generate_training_trajectory(
     num_waypoints=20, 
     num_hover_points=3,
     time_step_duration=20,
-    num_samples=3):
+    num_samples=2):
     """
     Generates position and orientation trajectories using piecewise3D.
 
@@ -1236,22 +1237,64 @@ def generate_training_trajectory(
     V[:num_hover_points, :] = np.array([np.zeros(3)*(num_hover_points-i)/(num_hover_points-1) + start_vel*i/(num_hover_points-1) for i in range(num_hover_points)])
     TH[:num_hover_points, :] = np.array([np.zeros(3)*(num_hover_points-i)/(num_hover_points-1) + np.array([0.0, 0.0, start_yaw])*i/(num_hover_points-1) for i in range(num_hover_points)])
     OMEGA[:num_hover_points, :] = np.array([np.zeros(3)*(num_hover_points-i)/(num_hover_points-1) + np.array([0.0, 0.0, start_yaw_rate])*i/(num_hover_points-1) for i in range(num_hover_points)])
-    # print(P, V, TH, OMEGA)
-    for i in range(num_hover_points, total_points):
-        if fixed_pos_change_dist:
-            noise = np.random.normal(size=3)
-            noise = noise / np.linalg.norm(noise) * position_change_scale
-        else:
-            noise = np.random.normal(loc=0.0, scale=position_change_scale, size=3)
-        tentative_pos = P[i - 1] + noise
-        if tentative_pos[2] < 0.5:
-            tentative_pos[2] = 0.5
-        P[i] = tentative_pos
-        V[i] = V[i - 1] + np.random.normal(loc=0.0, scale=std_velocity_change, size=3)
-        ACC[i] = ACC[i - 1] + np.random.normal(loc=0.0, scale=std_acceleration_change, size=3)
-        TH[i][2] = TH[i - 1][2] + np.random.normal(loc=0.0, scale=orientation_change_scale, size=1)
-        OMEGA[i][2] = OMEGA[i - 1][2] + np.random.normal(loc=0.0, scale=std_angular_velocity_change, size=1)
-        ALPHA[i][2] = ALPHA[i - 1][2] + np.random.normal(loc=0.0, scale=std_angular_acceleration_change, size=1)
+
+    if traj_type == 'random_walk':
+        for i in range(num_hover_points, total_points):
+            if fixed_pos_change_dist:
+                noise = np.random.normal(size=3)
+                noise = noise / np.linalg.norm(noise) * position_change_scale
+            else:
+                noise = np.random.normal(loc=0.0, scale=position_change_scale, size=3)
+            tentative_pos = P[i - 1] + noise
+            if tentative_pos[2] < 0.5:
+                tentative_pos[2] = 0.5
+            P[i] = tentative_pos
+            V[i] = V[i - 1] + np.random.normal(loc=0.0, scale=std_velocity_change, size=3)
+            ACC[i] = ACC[i - 1] + np.random.normal(loc=0.0, scale=std_acceleration_change, size=3)
+            TH[i][2] = TH[i - 1][2] + np.random.normal(loc=0.0, scale=orientation_change_scale, size=1)
+            OMEGA[i][2] = OMEGA[i - 1][2] + np.random.normal(loc=0.0, scale=std_angular_velocity_change, size=1)
+            ALPHA[i][2] = ALPHA[i - 1][2] + np.random.normal(loc=0.0, scale=std_angular_acceleration_change, size=1)
+    elif traj_type == 'straight_line_x':
+        for i in range(num_hover_points, total_points):
+            P[i] = P[i - 1] + np.array([position_change_scale, 0.0, 0.0])
+    elif traj_type == 'straight_line_y':
+        for i in range(num_hover_points, total_points):
+            P[i] = P[i - 1] + np.array([0.0, position_change_scale, 0.0])
+    elif traj_type == 'straight_line_z':
+        for i in range(num_hover_points, total_points):
+            P[i] = P[i - 1] + np.array([0.0, 0.0, position_change_scale])
+    elif traj_type == 'sinoidial_x':
+        for i in range(num_hover_points, total_points):
+            P[i] = start_pos + np.array([position_change_scale*np.sin(2*np.pi*(i - num_hover_points)/(num_waypoints - 1)), 
+                                        position_change_scale*(i - num_hover_points)/(num_waypoints - 1), 
+                                        0.0])
+    elif traj_type == 'sinoidial_y':
+        for i in range(num_hover_points, total_points):
+            P[i] = start_pos + np.array([position_change_scale*(i - num_hover_points)/(num_waypoints - 1), 
+                                        position_change_scale*np.sin(2*np.pi*(i - num_hover_points)/(num_waypoints - 1)), 
+                                        0.0])
+    elif traj_type == 'sinoidial_z':
+        for i in range(num_hover_points, total_points):
+            P[i] = start_pos + np.array([position_change_scale*(i - num_hover_points)/(num_waypoints - 1), 
+                                        0.0, 
+                                        position_change_scale*np.sin(2*np.pi*(i - num_hover_points)/(num_waypoints - 1))])
+    elif traj_type == 'circle_xy_fixed_yaw':
+        radius = position_change_scale
+        center = start_pos - np.array([radius, 0.0, 0.0])
+        for i in range(num_hover_points, total_points):
+            angle = 2 * np.pi * (i - num_hover_points) / (num_waypoints - 1)
+            P[i] = center + np.array([radius * np.cos(angle), radius * np.sin(angle), 0.0])
+    elif traj_type == 'circle_xy_changing_yaw':
+        radius = position_change_scale
+        center = start_pos - np.array([radius, 0.0, 0.0])
+        for i in range(num_hover_points, total_points):
+            angle = 2 * np.pi * (i - num_hover_points) / (num_waypoints - 1)
+            P[i] = center + np.array([radius * np.cos(angle), radius * np.sin(angle), 0.0])
+            TH[i][2] = angle
+    else:
+        raise ValueError(f"Unknown traj_type: {traj_type}")
+
+
 
     X, Y, Z = P[:, 0], P[:, 1], P[:, 2]
     Vx, Vy, Vz = V[:, 0], V[:, 1], V[:, 2]
@@ -1387,7 +1430,7 @@ def generate_takeoff_trajectory(
     
     return pos_traj, orient_traj, time_duration
 
-def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
+def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120, traj_type="random_walk", traj_params=None):
     """
     Runs the trajectory following and data collection loop, returning the replay buffer.
     Args:
@@ -1406,7 +1449,10 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
         d1.get_position()
         time.sleep(0.01)
 
-    pos_traj, orient_traj, time_duration = generate_training_trajectory()  # generates trajectory for the first 40 seconds
+    if traj_params is not None:
+        pos_traj, orient_traj, time_duration = generate_training_trajectory(traj_type=traj_type, **traj_params)
+    else:
+        pos_traj, orient_traj, time_duration = generate_training_trajectory(traj_type=traj_type)
     x, y, z, dx, dy, dz, ddx, ddy, ddz = pos_traj
     roll, pitch, yaw, droll, dpitch, dyaw, ddroll, ddpitch, ddyaw = orient_traj
     next_state = None
@@ -1496,7 +1542,7 @@ def collect_dynamics_training_data(r1: Robot, d1: Robot, cut_at = 120):
 if __name__ == "__main__":
     # sim.startSimulation()
     r1 = Robot(
-        'MultiRotor',
+        'MultiRotor', 
         ['/propeller{}'.format(i+1) for i in range(8)],
         PID_param(
             mass=0.32, inertia=0.03,

@@ -25,19 +25,35 @@ def connect_run_disconnect():
                 ['/propeller{}'.format(i+1) for i in range(8)],
                 mlb.PID_param(
                     mass=0.32, inertia=0.03,
-                    KZ=(5.0, 3.5, 0.2),
-                    KX=(4.8, 5.9, 0.0),
-                    KY=(1.25, 2.0, 0.0),
-                    KR=(16.0, 7.0, 0.0),
-                    KP=(1.2, 0.5, 0.0),
-                    KYAW=(-1.0, -0.8, 0.0)
+                    KZ=(5.0, 3.5, 0.35),
+                    KX=(5.0, 3.35, 0.0),
+                    KY=(1.5, 2.0, 0.0),
+                    KR=(16.0, 6.0, 0.0),
+                    KP=(2.0, 0.3, 0.0),
+                    KYAW=(-2.0, -1.8, 0.0)
                 )
             )
             d1 = mlb.Robot('DesiredBox', client_id)
             g = 9.81
             
-                
-            replay_buffer = mlb.collect_dynamics_training_data(r1, d1, cut_at=60)
+            traj_params = {
+                "start_pos" : [0.0, 0.0, 2.0],
+                "start_yaw" : 0.0, 
+                "start_vel" : [0.0, 0.0, 0.0], 
+                "start_yaw_rate" : 0.0,
+                "position_change_scale" : 1.0, 
+                "fixed_pos_change_dist" : True,
+                "orientation_change_scale" : 0.1,
+                "std_velocity_change" : 0.0,
+                "std_angular_velocity_change" : 0.0,
+                "std_acceleration_change" : 0.0,
+                "std_angular_acceleration_change" : 0.0,
+                "num_waypoints" : 20, 
+                "num_hover_points" : 3,
+                "time_step_duration" : 20,
+                "num_samples" : 2
+            }
+            replay_buffer = mlb.collect_dynamics_training_data(r1, d1, cut_at=60, traj_type='circle_xy_fixed_yaw', traj_params=traj_params)
 
                 
 
@@ -68,11 +84,12 @@ def connect_run_disconnect():
         
 #         # Wait a moment for simulation to initialize
 # time.sleep(0.5)
-connect_run_disconnect()
-print("run 1 done")
-time.sleep(5)
-print("running run 2")
-connect_run_disconnect()
+if __name__ == "__main__":
+    connect_run_disconnect()
+    print("run 1 done")
+    time.sleep(5)
+    print("running run 2")
+    connect_run_disconnect()
 
 # if __name__ == "__main__":
 
